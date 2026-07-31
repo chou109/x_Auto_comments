@@ -148,7 +148,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.0</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.1</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -1993,12 +1993,9 @@
       const enabled = buttons.find((b) => b.getAttribute("aria-disabled") !== "true" && !b.disabled);
       if (enabled) return enabled;
     }
-    // X may render the send-button toolbar outside the composer container.
-    // Fall back to a visible enabled button as long as there is exactly one
-    // active reply dialog — which is the case during auto-reply.
-    const dialogButtons = [...document.querySelectorAll(selector)].filter((b) => isVisibleElement(b) && b.getAttribute("aria-disabled") !== "true" && !b.disabled);
-    if (dialogButtons.length === 1) return dialogButtons[0];
-    return null;
+    // Fall back to the original priority-ranked search.  In auto-reply the
+    // editor was just filled; the top-ranked enabled button is the right one.
+    return findSendButton(editor);
   }
   function findComposerFileInput(editor) {
     if (!editor?.isConnected) return null;
@@ -2017,12 +2014,10 @@
   }
   function scopeContainsElement(editor, child) {
     if (!editor?.isConnected || !child?.isConnected) return false;
-    const composer = findComposerContainer(editor);
-    const dialog = editor.closest('[role="dialog"]');
-    if (composer?.contains(child) || dialog?.contains(child)) return true;
-    // Accept any visible enabled send button that's the only one on the page.
-    const all = [...document.querySelectorAll('[data-testid="tweetButton"], [data-testid="tweetButtonInline"]')].filter((b) => isVisibleElement(b) && b.getAttribute("aria-disabled") !== "true" && !b.disabled);
-    return all.length === 1 && all[0] === child;
+    // In auto-reply the editor was just filled by us; any enabled visible
+    // send button is acceptable — the priority-ranked findSendButton already
+    // picked the best one.
+    return true;
   }
   function findComposerMediaPreview(editor) {
     if (!editor?.isConnected) return null;
@@ -3119,11 +3114,17 @@
       } catch {
         continue;
       }
-      await delay(700);
+      await delay(500);
       activeEditor = activeEditor?.isConnected ? activeEditor : findReplyEditor();
       actualText = readEditorText(activeEditor);
       if (editorTextMatches(actualText, text)) {
         return { editor: activeEditor, text, actualText, complete: true, method: strategies[index].name };
+      }
+      // Quick clear: only if the strategy produced wrong text, not nothing.
+      if (actualText && index < strategies.length - 1) {
+        selectEditorContents(activeEditor);
+        document.execCommand("delete", false);
+        await delay(100);
       }
     }
     return { editor: activeEditor, text, actualText, complete: false, method: "none" };
