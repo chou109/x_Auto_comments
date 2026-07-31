@@ -3,6 +3,21 @@ const DEFAULTS = {
   model: "gpt-4.1-mini"
 };
 
+function makeError(code, detail = "") {
+  const error = new Error(JSON.stringify({ code, detail: String(detail || "") }));
+  error.code = code;
+  error.detail = String(detail || "");
+  return error;
+}
+function serializeError(error) {
+  if (error?.code) return { code: error.code, detail: error.detail || "" };
+  try {
+    const parsed = JSON.parse(error?.message || "");
+    if (parsed?.code) return parsed;
+  } catch {}
+  return { code: "providerError", detail: error?.message || String(error || "Unknown error") };
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "XRC_CONTEXT") {
     sendResponse({ ok: true, tabId: sender.tab?.id ?? null, now: Date.now() });
@@ -15,13 +30,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "XRC_REGISTER_JOB") {
     registerActiveJob(sender.tab?.id, message.storageKey, message.accountId)
       .then(() => sendResponse({ ok: true, now: Date.now() }))
-      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+      .catch((error) => sendResponse({ ok: false, error: serializeError(error) }));
     return true;
   }
   if (!["AI_REQUEST", "POST_AI_REQUEST"].includes(message?.type)) return false;
   const handler = message.type === "POST_AI_REQUEST" ? handlePostAiRequest : handleAiRequest;
   handler(message.payload).then(sendResponse).catch((error) => {
-    sendResponse({ ok: false, error: error.message || String(error) });
+    sendResponse({ ok: false, error: serializeError(error) });
   });
   return true;
 });
@@ -73,12 +88,12 @@ async function wakeActiveJobTabs() {
 async function handlePostAiRequest({ prompt, maxChars }) {
   const settings = await chrome.storage.local.get(["apiKey", "apiBase", "model"]);
   const apiKey = String(settings.apiKey || "").trim();
-  if (!apiKey) throw new Error("请先在评论设置中填写 API Key");
+  if (!apiKey) throw new Error(JSON.stringify({ code: "missingApiKey", detail: "" }));
   const apiBase = String(settings.apiBase || DEFAULTS.apiBase).replace(/\/$/, "");
   const model = String(settings.model || DEFAULTS.model).trim();
   const hardLimit = Math.max(20, Math.min(280, Number(maxChars) || 280));
   const directive = String(prompt || "").trim();
-  if (!directive) throw new Error("请先填写 AI 发帖提示词");
+  if (!directive) throw makeError("missingPostPrompt");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45000);
   let response;
@@ -98,27 +113,27 @@ async function handlePostAiRequest({ prompt, maxChars }) {
       })
     });
   } catch (error) {
-    if (error?.name === "AbortError") throw new Error("API 请求超过 45 秒");
-    throw new Error(`无法连接 API：${error?.message || String(error)}`);
+    if (error?.name === "AbortError") throw makeError("timeout");
+    throw makeError("network", error?.message || String(error));
   } finally {
     clearTimeout(timeout);
   }
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body?.error?.message || `AI 请求失败 (${response.status})`);
+  if (!response.ok) throw makeError("providerError", body?.error?.message || `HTTP ${response.status}`);
   const content = body?.choices?.[0]?.message?.content;
-  if (!content) throw new Error("AI 没有返回发帖内容");
+  if (!content) throw makeError("emptyResponse");
   try {
     const data = JSON.parse(String(content).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
     return { ok: true, data };
   } catch {
-    throw new Error("AI 返回的发帖内容不是有效 JSON");
+    throw makeError("invalidJson");
   }
 }
 
 async function handleAiRequest({ tweet, replyMode, customPrompt, maxChars, suggestionCount }) {
   const settings = await chrome.storage.local.get(["apiKey", "apiBase", "model"]);
   const apiKey = String(settings.apiKey || "").trim();
-  if (!apiKey) throw new Error("请先在设置中填写 API Key");
+  if (!apiKey) throw makeError("missingApiKey");
 
   const apiBase = String(settings.apiBase || DEFAULTS.apiBase).replace(/\/$/, "");
   const model = String(settings.model || DEFAULTS.model).trim();
@@ -143,25 +158,25 @@ async function handleAiRequest({ tweet, replyMode, customPrompt, maxChars, sugge
       })
     });
   } catch (error) {
-    if (error?.name === "AbortError") throw new Error("API 请求超过 45 秒，请检查 API 地址、网络或服务商状态");
-    throw new Error(`无法连接 API：${error?.message || String(error)}`);
+    if (error?.name === "AbortError") throw makeError("timeout");
+    throw makeError("network", error?.message || String(error));
   } finally {
     clearTimeout(timeout);
   }
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body?.error?.message || `AI 请求失败 (${response.status})`);
+  if (!response.ok) throw makeError("providerError", body?.error?.message || `HTTP ${response.status}`);
   const choice = body?.choices?.[0];
   const content = choice?.message?.content;
   if (!content) {
     const finishReason = choice?.finish_reason;
-    if (finishReason === "length") throw new Error("模型输出额度被推理过程耗尽，未生成正文；已取消扩展的 Token 硬限制，请重试");
-    throw new Error(`AI 接口成功但正文为空${finishReason ? `（结束原因：${finishReason}）` : ""}`);
+    if (finishReason === "length") throw makeError("outputLength");
+    throw makeError("emptyResponse", finishReason ? `finish_reason=${finishReason}` : "");
   }
   try {
     const jsonText = String(content).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
     return { ok: true, data: JSON.parse(jsonText) };
   } catch {
-    throw new Error("AI 返回的不是有效 JSON");
+    throw makeError("invalidJson");
   }
 }
 

@@ -74,14 +74,53 @@
   };
   const REPLY_PROFILE_KEYS = ["authors", "keywords", "targetUrls", "directTargetRepeatCount", "accountCollectLimit", "loopMode", "loopTotalLimit", "loopRoundLimit", "loopRoundIntervalMinutes", "loopEmptyRoundLimit", "minLikes", "maxAgeDays", "excludeReplies", "excludeQuotes", "replyAlreadyReplied", "strictKeywordBody", "sortBy", "replySource", "specifiedReplies", "specifiedReplyOrder", "replyMode", "customPrompt", "maxChars", "suggestionCount", "autoReplyCount", "autoDelaySeconds", "delayMode", "randomDelayMin", "randomDelayMax", "imageUseChance", "imageCount", "imageSelectionMode", "imageLibrary", "activeHoursEnabled", "activeHourStart", "activeHourEnd", "replyHourlyLimit", "replyDailyLimit", "consecutiveFailureLimit"];
   const POST_PROFILE_KEYS = ["postSource", "postSpecifiedContents", "postSpecifiedOrder", "postAiPrompt", "postMaxChars", "autoPostCount", "postDelayMode", "postDelaySeconds", "postRandomDelayMin", "postRandomDelayMax", "postImageUseChance", "postImageCount", "postImageSelectionMode", "postImageLibrary", "postDestination", "postCommunity", "postLoopEnabled", "postLoopTotalLimit", "postLoopRoundIntervalMinutes", "postLoopEmptyRoundLimit", "activeHoursEnabled", "activeHourStart", "activeHourEnd", "postHourlyLimit", "postDailyLimit", "consecutiveFailureLimit"];
-  const state = { settings: { ...DEFAULTS }, tweets: [], selected: null, minimized: false, autoRunning: false, postRunning: false, autoStop: false, autoConfirm: false, autoStatus: "", collecting: false, collectStop: false, repliedUrls: new Set(), tabId: null, accountId: "unknown" };
+  const state = { settings: { ...DEFAULTS }, locale: "zh-CN", tweets: [], selected: null, minimized: false, autoRunning: false, postRunning: false, autoStop: false, autoConfirm: false, autoStatus: "", collecting: false, collectStop: false, repliedUrls: new Set(), tabId: null, accountId: "unknown", taskBars: { "xrc-jobbar": null, "xrc-post-jobbar": null } };
   const delayWaiters = new Set();
+  const i18n = window.XRC_I18N;
+  function localizeText(value) { return i18n?.text(value, state.locale) || String(value ?? ""); }
+  function localizeError(error) { return i18n?.errorMessage(error, state.locale) || String(error?.message || error || "Unknown error"); }
+  function localeLabel() { return state.locale === "zh-CN" ? "EN" : "中"; }
+  function localizedLanguageNotice() { return state.locale === "zh-CN" ? "语言已切换为中文" : "语言切换为英文"; }
+  function applyLocale() {
+    if (!root.isConnected) return;
+    root.lang = state.locale;
+    i18n?.localizeElement(root, state.locale);
+    i18n?.localizeStaticNodes(staticTextNodes, state.locale);
+    const toggle = byId("xrc-language-toggle");
+    if (toggle) {
+      toggle.textContent = localeLabel();
+      toggle.title = state.locale === "zh-CN" ? "Switch to English" : "切换为中文";
+      toggle.setAttribute("aria-label", toggle.title);
+    }
+    renderList();
+    renderImageLibrary();
+    renderPostImageLibrary();
+    updateSpecifiedRowLabels();
+    updatePostContentLabels();
+    renderProfileSelectors().catch(() => {});
+    for (const [barId, status] of Object.entries(state.taskBars)) {
+      if (status) renderTaskBar(barId, status.message, status.meta, status.waiting);
+    }
+    updateJobPauseButton(byId("xrc-pause-job")?.dataset.act === "resume-job");
+    updateJobLoopActions(!byId("xrc-stop-loop-job")?.classList.contains("xrc-hidden"));
+    updatePostPauseButton(byId("xrc-post-pause")?.dataset.act === "resume-post");
+    const postCancel = byId("xrc-post-jobbar")?.querySelector('[data-act="cancel-post"]');
+    if (postCancel) postCancel.textContent = localizeText("结束发帖");
+    root.classList.remove("xrc-locale-pending");
+  }
+  async function toggleLanguage() {
+    state.locale = state.locale === "zh-CN" ? "en-US" : "zh-CN";
+    await chrome.storage.local.set({ xrcLanguage: state.locale });
+    applyLocale();
+    toast(localizedLanguageNotice());
+  }
 
   const root = document.createElement("div");
   root.id = "xrc-root";
+  root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong>X 自动评论助手</strong><small>采集 · 评论 · 发帖</small></div><div><button data-act="min" title="最小化">−</button><button data-act="close" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -270,6 +309,7 @@
       <div id="xrc-toast"></div>
     </section>`;
   document.documentElement.appendChild(root);
+  const staticTextNodes = i18n?.captureStaticNodes ? i18n.captureStaticNodes(root) : [];
 
   init().catch((error) => {
     if (isExtensionContextInvalidated(error)) return showExtensionReloadNotice();
@@ -280,10 +320,20 @@
     const context = await chrome.runtime.sendMessage({ type: "XRC_CONTEXT" }).catch(() => null);
     state.tabId = context?.tabId ?? null;
     state.accountId = await detectCurrentAccountId();
-    state.settings = { ...DEFAULTS, ...(await chrome.storage.local.get(Object.keys(DEFAULTS).concat("apiKey"))) };
+    const stored = await chrome.storage.local.get(Object.keys(DEFAULTS).concat("apiKey", "xrcLanguage"));
+    state.settings = { ...DEFAULTS, ...stored };
+    state.locale = i18n?.normalizeLocale(stored.xrcLanguage) || "zh-CN";
     fillForm();
     await renderProfileSelectors();
+    applyLocale();
     root.addEventListener("click", onClick);
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== "local" || !changes.xrcLanguage || !root.isConnected) return;
+      const locale = i18n?.normalizeLocale(changes.xrcLanguage.newValue) || "zh-CN";
+      if (locale === state.locale) return;
+      state.locale = locale;
+      applyLocale();
+    });
     byId("xrc-jobbar").addEventListener("click", (event) => {
       const button = event.target.closest("button[data-act]");
       if (!button) return;
@@ -333,8 +383,8 @@
         normalizedRepliedUrls.some((value, index) => value !== storedRepliedUrls[index])) {
       await chrome.storage.local.set({ repliedTweetUrls: normalizedRepliedUrls });
     }
-    if (saved.autoLastStatus) { toast(saved.autoLastStatus); await chrome.storage.local.remove("autoLastStatus"); }
-    if (saved.postLastStatus) { toast(saved.postLastStatus); await chrome.storage.local.remove("postLastStatus"); }
+    if (saved.autoLastStatus) { toast(localizeText(saved.autoLastStatus)); await chrome.storage.local.remove("autoLastStatus"); }
+    if (saved.postLastStatus) { toast(localizeText(saved.postLastStatus)); await chrome.storage.local.remove("postLastStatus"); }
     if (saved.autoJob?.active && ownsJob(saved.autoJob)) resumeAutoJob(saved.autoJob);
     else if (saved.postJob?.active && ownsJob(saved.postJob)) resumePostJob(saved.postJob);
     else if (saved.collectJob?.active && ownsJob(saved.collectJob)) resumeCollectionJob(saved.collectJob);
@@ -419,6 +469,7 @@
     const tab = button.dataset.tab;
     if (tab) return switchTab(tab);
     const act = button.dataset.act;
+    if (act === "toggle-language") return toggleLanguage();
     if (act === "min") return root.classList.toggle("minimized");
     if (act === "close") return root.remove();
     if (act === "scan") return scan();
@@ -433,7 +484,7 @@
       state.collectStop = true;
       const saved = await chrome.storage.local.get("collectJob");
       if (saved.collectJob) await chrome.storage.local.set({ collectJob: { ...saved.collectJob, active: false, stoppedAt: Date.now() } });
-      button.textContent = "正在停止…"; button.disabled = true;
+      button.textContent = localizeText("正在停止…"); button.disabled = true;
       return;
     }
     if (act === "save") return saveAll();
@@ -550,7 +601,7 @@
     const select = byId(id);
     if (!select) return;
     const current = selected || select.value;
-    select.replaceChildren(new Option("选择已保存方案", ""));
+    select.replaceChildren(new Option(localizeText("选择已保存方案"), ""));
     for (const profile of Array.isArray(profiles) ? profiles : []) {
       select.append(new Option(profile.name, profile.name));
     }
@@ -1212,17 +1263,18 @@
 
   function updateReplyLoopStatus(loop, text = "") {
     const node = byId("xrc-loop-status"); if (!node) return;
-    node.textContent = text || (loop?.active
+    const status = text || (loop?.active
       ? `运行中：已发送 ${loop.sent || 0}/${loop.totalLimit}，第 ${loop.rounds || 0} 轮，阶段 ${loop.phase || "准备"}`
       : "达到总上限后自动结束；再次运行必须重新点击开始。");
+    node.textContent = localizeText(status);
   }
 
   function updateCollectButtons(text, running = state.collecting, mode = "") {
     const account = byId("xrc-collect-button"), search = byId("xrc-collect-search-button");
     if (!account || !search) return;
     account.disabled = running && mode === "search"; search.disabled = running && mode === "account";
-    account.textContent = running && mode === "account" ? text : "自动采集账号帖子";
-    search.textContent = running && mode === "search" ? text : "自动采集关键词搜索结果（忽略作者栏）";
+    account.textContent = localizeText(running && mode === "account" ? text : "自动采集账号帖子");
+    search.textContent = localizeText(running && mode === "search" ? text : "自动采集关键词搜索结果（忽略作者栏）");
     account.dataset.act = running && mode === "account" ? "stop-collect" : "collect-account";
     search.dataset.act = running && mode === "search" ? "stop-collect" : "collect-search";
   }
@@ -1326,7 +1378,8 @@
   }
 
   function sortDescription(mode) {
-    return ({ views: "浏览量从高到低", viewsAsc: "浏览量从低到高", newest: "日期从新到旧", oldest: "日期从旧到新", likes: "点赞数从高到低" })[mode] || "浏览量从高到低";
+    const description = ({ views: "浏览量从高到低", viewsAsc: "浏览量从低到高", newest: "日期从新到旧", oldest: "日期从旧到新", likes: "点赞数从高到低" })[mode] || "浏览量从高到低";
+    return localizeText(description);
   }
 
   function renderList() {
@@ -1339,15 +1392,15 @@
       ? state.tweets.length
       : state.tweets.filter((tweet) => !tweet.alreadyReplied).length;
     const plannedCount = directMultiMode ? eligibleCount : state.settings.autoReplyCount;
-    const autoButtons = state.autoRunning ? '<button class="danger" data-act="stop-auto">停止</button>' : '<button data-act="auto">开始</button>';
+    const autoButtons = state.autoRunning ? `<button class="danger" data-act="stop-auto">${localizeText("停止")}</button>` : `<button data-act="auto">${localizeText("开始")}</button>`;
     const modeDescription = directMultiMode
-      ? `${state.tweets.length} 个指定帖子 × 每帖 ${directRepeatCount} 条`
-      : `当前可发送 ${eligibleCount} 条 · 按${sortDescription(state.settings.sortBy)}处理`;
-    const autoBar = state.tweets.length ? `<div class="xrc-auto"><div><b>批量自动回复</b><label>计划发送 <input id="xrc-auto-run-count" type="number" min="1" max="2000" value="${plannedCount}" ${state.autoRunning ? "disabled" : ""}> 条</label><small>${escapeHtml(state.autoStatus || modeDescription)}</small></div>${autoButtons}</div>` : "";
+      ? `${state.tweets.length} ${localizeText("个指定帖子")} × ${localizeText("每帖")} ${directRepeatCount} ${localizeText("条")}`
+      : `${localizeText("当前可发送")} ${eligibleCount} ${localizeText("条")} · ${localizeText("按")} ${sortDescription(state.settings.sortBy)} ${localizeText("处理")}`;
+    const autoBar = state.tweets.length ? `<div class="xrc-auto"><div><b>${localizeText("批量自动回复")}</b><label>${localizeText("计划发送")} <input id="xrc-auto-run-count" type="number" min="1" max="2000" value="${plannedCount}" ${state.autoRunning ? "disabled" : ""}> ${localizeText("条")}</label><small>${escapeHtml(localizeText(state.autoStatus || modeDescription))}</small></div>${autoButtons}</div>` : "";
     byId("xrc-list").innerHTML = state.tweets.length ? autoBar + state.tweets.map((t, i) => `
-      <article class="xrc-card"><div class="xrc-meta"><b>@${escapeHtml(t.author)}</b><span>❤ ${formatNumber(t.likes)}</span><span>◉ ${formatNumber(t.views)}</span><em>${Math.round(t.ageHours)}h</em>${t.alreadyReplied ? '<strong class="replied">已回复</strong>' : ""}</div>
-      <p>${escapeHtml(t.text.slice(0, 240))}</p>
-      <div class="xrc-actions"><button data-act="open" data-url="${escapeAttr(t.url)}">原帖</button><button class="hot" data-act="details" data-index="${i}">生成回复</button></div></article>`).join("") : '<div class="xrc-empty">没有符合条件的帖子。尝试降低点赞门槛、清空作者，或先滚动加载更多内容。</div>';
+      <article class="xrc-card"><div class="xrc-meta"><b>@${escapeHtml(t.author)}</b><span>❤ ${formatNumber(t.likes)}</span><span>◉ ${formatNumber(t.views)}</span><em>${Math.round(t.ageHours)}h</em>${t.alreadyReplied ? `<strong class="replied">${localizeText("已回复")}</strong>` : ""}</div>
+      <p data-xrc-user-content>${escapeHtml(t.text.slice(0, 240))}</p>
+      <div class="xrc-actions"><button data-act="open" data-url="${escapeAttr(t.url)}">${localizeText("原帖")}</button><button class="hot" data-act="details" data-index="${i}">${localizeText("生成回复")}</button></div></article>`).join("") : `<div class="xrc-empty">${localizeText("没有符合条件的帖子。尝试降低点赞门槛、清空作者，或先滚动加载更多内容。")}</div>`;
   }
 
   async function showDetails(index) {
@@ -1358,15 +1411,15 @@
     }
     state.selected = index;
     byId("xrc-detail").classList.add("active");
-    byId("xrc-detail").innerHTML = `<button data-act="back">← 返回</button><h3>@${escapeHtml(tweet.author)}</h3><p>${escapeHtml(tweet.text)}</p><div class="xrc-loading">${state.settings.replySource === "ai" ? "正在生成回复…" : "正在载入指定内容…"}</div>`;
+    byId("xrc-detail").innerHTML = `<button data-act="back">← ${localizeText("返回")}</button><h3>@${escapeHtml(tweet.author)}</h3><p data-xrc-user-content>${escapeHtml(tweet.text)}</p><div class="xrc-loading">${localizeText(state.settings.replySource === "ai" ? "正在生成回复…" : "正在载入指定内容…")}</div>`;
     const result = state.settings.replySource === "specified" ? { replies: parseSpecifiedReplies(state.settings.specifiedReplies) } : await sendAi(tweet);
     if (!result) {
-      byId("xrc-detail").innerHTML = `<button data-act="back">← 返回</button><h3>生成回复失败</h3><p>API 没有成功返回，请检查设置后重试。</p>`;
+      byId("xrc-detail").innerHTML = `<button data-act="back">← ${localizeText("返回")}</button><h3>${localizeText("生成回复失败")}</h3><p>${localizeText("API 没有成功返回，请检查设置后重试。")}</p>`;
       return;
     }
     tweet.replies = Array.isArray(result.replies) ? result.replies.slice(0, state.settings.suggestionCount).map((reply) => fitReply(reply, state.settings.maxChars)) : [];
-    byId("xrc-detail").innerHTML = `<button data-act="back">← 返回</button><h3>@${escapeHtml(tweet.author)}</h3><p>${escapeHtml(tweet.text)}</p>
-      <h4>回复建议 <small class="xrc-source-badge">${state.settings.replySource === "specified" ? "指定内容" : "AI 生成"}</small></h4>${tweet.replies.map((r, ri) => `<button class="xrc-reply" data-act="fill" data-index="${index}" data-reply="${ri}"><span>${escapeHtml(r)}<small>${[...r].length}/${state.settings.maxChars}</small></span><b>填入</b></button>`).join("")}`;
+    byId("xrc-detail").innerHTML = `<button data-act="back">← ${localizeText("返回")}</button><h3>@${escapeHtml(tweet.author)}</h3><p data-xrc-user-content>${escapeHtml(tweet.text)}</p>
+      <h4>${localizeText("回复建议")} <small class="xrc-source-badge">${localizeText(state.settings.replySource === "specified" ? "指定内容" : "AI 生成")}</small></h4>${tweet.replies.map((r, ri) => `<button class="xrc-reply" data-act="fill" data-index="${index}" data-reply="${ri}"><span data-xrc-user-content>${escapeHtml(r)}<small>${[...r].length}/${state.settings.maxChars}</small></span><b>${localizeText("填入")}</b></button>`).join("")}`;
   }
 
   async function fillReply(index, replyIndex) {
@@ -1712,13 +1765,14 @@
 
   function updateJobPauseButton(paused) {
     const button = byId("xrc-pause-job"); if (!button) return;
-    button.textContent = paused ? "继续" : "暂停";
+    button.textContent = localizeText(paused ? "继续" : "暂停");
     button.dataset.act = paused ? "resume-job" : "pause-job";
   }
   function updateJobLoopActions(loopMode) {
     const cancel = byId("xrc-cancel-job");
     const stopLoop = byId("xrc-stop-loop-job");
-    if (cancel) cancel.textContent = loopMode ? "结束本轮" : "结束任务";
+    if (cancel) cancel.textContent = localizeText(loopMode ? "结束本轮" : "结束任务");
+    if (stopLoop) stopLoop.textContent = localizeText("终止循环");
     stopLoop?.classList.toggle("xrc-hidden", !loopMode);
   }
 
@@ -1770,8 +1824,8 @@
     try {
       const suggestionCount = Number.isFinite(Number(suggestionCountOverride)) ? Number(suggestionCountOverride) : state.settings.suggestionCount;
       const response = await chrome.runtime.sendMessage({ type: "AI_REQUEST", payload: { replyMode: state.settings.replyMode, customPrompt: state.settings.customPrompt, maxChars: state.settings.maxChars, suggestionCount, tweet: { author: tweet.author, text: tweet.text, likes: tweet.likes, views: tweet.views, ageHours: Math.round(tweet.ageHours), url: tweet.url } } });
-      if (!response?.ok) throw new Error(response?.error || "未知错误"); return response.data;
-    } catch (error) { toast(error.message, true); switchTab("settings"); return null; }
+      if (!response?.ok) { const failure = response?.error || { code: "providerError", detail: "Unknown error" }; throw Object.assign(new Error(failure.detail || failure.message || "Unknown error"), failure); } return response.data;
+    } catch (error) { toast(localizeError(error), true); switchTab("settings"); return null; }
   }
 
   function closeDetails() { byId("xrc-detail").classList.remove("active"); }
@@ -1850,7 +1904,7 @@
     list.innerHTML = rows.reverse().map((value, index) => specifiedRowHtml(value, rows.length - index)).join("");
     updateSpecifiedRowLabels();
   }
-  function specifiedRowHtml(value, number) { return `<div class="xrc-specified-row"><div><b>回复 ${number}</b><button data-act="remove-specified" title="删除这条">删除</button></div><textarea data-specified-reply rows="3" placeholder="填写第 ${number} 条固定回复">${escapeHtml(value)}</textarea></div>`; }
+  function specifiedRowHtml(value, number) { return `<div class="xrc-specified-row"><div><b>${localizeText("回复")} ${number}</b><button data-act="remove-specified" title="${localizeText("删除")}">${localizeText("删除")}</button></div><textarea data-specified-reply rows="3" placeholder="${localizeText("填写第")} ${number} ${localizeText("条固定回复")}">${escapeHtml(value)}</textarea></div>`; }
   function addSpecifiedRow() {
     const details = byId("xrc-specified-details");
     const list = byId("xrc-specified-list");
@@ -1890,18 +1944,20 @@
     const rows = [...byId("xrc-specified-list").querySelectorAll(".xrc-specified-row")];
     rows.forEach((row, index) => {
       const number = rows.length - index;
-      row.querySelector("b").textContent = `回复 ${number}`;
-      row.querySelector("textarea").placeholder = `填写第 ${number} 条固定回复`;
+      row.querySelector("b").textContent = `${localizeText("回复")} ${number}`;
+      row.querySelector("textarea").placeholder = `${localizeText("填写第")} ${number} ${localizeText("条固定回复")}`;
+      row.querySelector("button").textContent = localizeText("删除");
+      row.querySelector("button").title = localizeText("删除");
     });
     const count = rows.filter((row) => row.querySelector("textarea")?.value.trim()).length;
-    byId("xrc-specified-count").textContent = `${count} 条`;
+    byId("xrc-specified-count").textContent = state.locale === "zh-CN" ? `${count} 条` : `${count} items`;
   }
   function getSpecifiedRowValues() {
     return [...byId("xrc-specified-list").querySelectorAll("textarea[data-specified-reply]")]
       .map((textarea) => textarea.value.trim()).filter(Boolean).reverse();
   }
   function postContentRowHtml(value, number) {
-    return `<div class="xrc-specified-row"><div><b>帖子 ${number}</b><button data-act="remove-post-content">删除</button></div><textarea data-post-content rows="4" placeholder="填写第 ${number} 条固定帖子">${escapeHtml(value)}</textarea></div>`;
+    return `<div class="xrc-specified-row"><div><b>${localizeText("帖子")} ${number}</b><button data-act="remove-post-content">${localizeText("删除")}</button></div><textarea data-post-content rows="4" placeholder="${localizeText("填写第")} ${number} ${localizeText("条固定帖子")}">${escapeHtml(value)}</textarea></div>`;
   }
   function renderPostContentRows(values) {
     const rows = Array.isArray(values) && values.length ? [...values] : [""];
@@ -1967,10 +2023,12 @@
     const rows = [...byId("xrc-post-specified-list").querySelectorAll(".xrc-specified-row")];
     rows.forEach((row, index) => {
       const number = rows.length - index;
-      row.querySelector("b").textContent = `帖子 ${number}`;
-      row.querySelector("textarea").placeholder = `填写第 ${number} 条固定帖子`;
+      row.querySelector("b").textContent = `${localizeText("帖子")} ${number}`;
+      row.querySelector("textarea").placeholder = `${localizeText("填写第")} ${number} ${localizeText("条固定帖子")}`;
+      row.querySelector("button").textContent = localizeText("删除");
     });
-    byId("xrc-post-specified-count").textContent = `${rows.filter((row) => row.querySelector("textarea")?.value.trim()).length} 条`;
+    const count = rows.filter((row) => row.querySelector("textarea")?.value.trim()).length;
+    byId("xrc-post-specified-count").textContent = state.locale === "zh-CN" ? `${count} 条` : `${count} items`;
   }
   function getPostContentValues() {
     return [...byId("xrc-post-specified-list").querySelectorAll("textarea[data-post-content]")]
@@ -2003,7 +2061,7 @@
     const list = byId("xrc-post-image-list");
     if (!list) return;
     const images = Array.isArray(state.settings.postImageLibrary) ? state.settings.postImageLibrary : [];
-    list.innerHTML = images.length ? images.map((item, index) => `<div class="xrc-image-item" title="${escapeAttr(item.name || `图片 ${index + 1}`)}"><img src="${escapeAttr(item.dataUrl)}" alt=""><button data-act="remove-post-image" data-index="${index}" title="删除">×</button></div>`).join("") : '<div class="xrc-image-empty">尚未添加发帖图片</div>';
+    list.innerHTML = images.length ? images.map((item, index) => `<div class="xrc-image-item" title="${escapeAttr(item.name || `${localizeText("图片")} ${index + 1}`)}"><img src="${escapeAttr(item.dataUrl)}" alt=""><button data-act="remove-post-image" data-index="${index}" title="${localizeText("删除")}">×</button></div>`).join("") : `<div class="xrc-image-empty">${localizeText("尚未添加发帖图片")}</div>`;
   }
   async function addPostImages(fileList) {
     const files = [...(fileList || [])];
@@ -2175,10 +2233,10 @@
     if (job.source === "ai") {
       try {
         const response = await chrome.runtime.sendMessage({ type: "POST_AI_REQUEST", payload: { prompt: job.prompt, maxChars: job.maxChars } });
-        if (!response?.ok) throw new Error(response?.error || "AI 没有返回内容");
+        if (!response?.ok) { const failure = response?.error || { code: "providerError", detail: "Unknown error" }; throw Object.assign(new Error(failure.detail || failure.message || "Unknown error"), failure); }
         return response.data?.posts?.[0] || "";
       } catch (error) {
-        toast(error.message, true);
+        toast(localizeError(error), true);
         return "";
       }
     }
@@ -2456,7 +2514,7 @@
   function updatePostPauseButton(paused) {
     const button = byId("xrc-post-pause");
     if (!button) return;
-    button.textContent = paused ? "继续" : "暂停";
+    button.textContent = localizeText(paused ? "继续" : "暂停");
     button.dataset.act = paused ? "resume-post" : "pause-post";
   }
   async function clearPostComposer(targetEditor = findReplyEditor()) {
@@ -2580,7 +2638,7 @@
     const list = byId("xrc-image-list");
     if (!list) return;
     const images = Array.isArray(state.settings.imageLibrary) ? state.settings.imageLibrary : [];
-    list.innerHTML = images.length ? images.map((item, index) => `<div class="xrc-image-item" title="${escapeAttr(item.name || `图片 ${index + 1}`)}"><img src="${escapeAttr(item.dataUrl)}" alt=""><button data-act="remove-image" data-index="${index}" title="删除">×</button></div>`).join("") : '<div class="xrc-image-empty">尚未添加图片</div>';
+    list.innerHTML = images.length ? images.map((item, index) => `<div class="xrc-image-item" title="${escapeAttr(item.name || `${localizeText("图片")} ${index + 1}`)}"><img src="${escapeAttr(item.dataUrl)}" alt=""><button data-act="remove-image" data-index="${index}" title="${localizeText("删除")}">×</button></div>`).join("") : `<div class="xrc-image-empty">${localizeText("尚未添加图片")}</div>`;
   }
   async function addImages(fileList) {
     const files = [...(fileList || [])];
@@ -2682,15 +2740,16 @@
   }
   function chooseJobDelay(job) { if (job.delayMode !== "random") return clamp(job.delaySeconds, 1, 600, 10); const min = clamp(job.randomDelayMin, 1, 600, 10); const max = clamp(job.randomDelayMax, min, 600, Math.max(min, 30)); return Math.floor(Math.random() * (max - min + 1)) + min; }
   function renderTaskBar(barId, message, meta = "", waiting = false) {
+    state.taskBars[barId] = message ? { message, meta, waiting } : null;
     const bar = byId(barId);
     if (!bar) return;
     bar.classList.toggle("active", Boolean(message));
     bar.classList.toggle("waiting", Boolean(message && waiting));
     const primary = bar.querySelector(".xrc-jobbar-primary");
     const detail = bar.querySelector(".xrc-jobbar-meta");
-    if (primary) primary.textContent = message ? `@${state.accountId} · ${message}` : "";
+    if (primary) primary.textContent = message ? `@${state.accountId} · ${localizeText(message)}` : "";
     if (detail) {
-      detail.textContent = meta || "";
+      detail.textContent = meta ? localizeText(meta) : "";
       detail.hidden = !meta;
     }
   }
@@ -2889,7 +2948,7 @@
   function formatSearchTerm(term) { return /\s/.test(term) ? `"${term.replace(/"/g, "")}\"` : term; }
   function daysAgoDate(days) { const date = new Date(); date.setDate(date.getDate() - days); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; }
   function parseMetric(value) { const s = String(value).replace(/,/g, ""); const m = s.match(/([\d.]+)\s*([KMB万]?)/i); if (!m) return 0; const mult = { K: 1e3, M: 1e6, B: 1e9, "万": 1e4 }[m[2].toUpperCase()] || 1; return Math.round(Number(m[1]) * mult); }
-  function formatNumber(n) { return Intl.NumberFormat("en", { notation: "compact" }).format(n); }
+  function formatNumber(n) { return Intl.NumberFormat(state.locale === "zh-CN" ? "zh-CN" : "en-US", { notation: "compact" }).format(n); }
   function escapeHtml(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
   function escapeAttr(s) { return escapeHtml(s); }
   async function detectCurrentAccountId(timeoutMs = 10000) {
@@ -2957,6 +3016,13 @@
   }
   function formatWaitCountdown(milliseconds) {
     const seconds = Math.max(1, Math.ceil(milliseconds / 1000));
+    if (state.locale === "en-US") {
+      if (seconds < 60) return `${seconds} sec`;
+      const minutes = Math.floor(seconds / 60), remainingSeconds = seconds % 60;
+      if (minutes < 60) return remainingSeconds ? `${minutes} min ${remainingSeconds} sec` : `${minutes} min`;
+      const hours = Math.floor(minutes / 60), remainingMinutes = minutes % 60;
+      return remainingMinutes ? `${hours} hr ${remainingMinutes} min` : `${hours} hr`;
+    }
     if (seconds < 60) return `${seconds} 秒`;
     const minutes = Math.floor(seconds / 60);
     const remainingSeconds = seconds % 60;
@@ -2968,13 +3034,17 @@
   function formatWaitResumeTime(timestamp) {
     const target = new Date(timestamp);
     const now = new Date();
-    const targetDay = `${target.getFullYear()}-${target.getMonth()}-${target.getDate()}`;
-    const today = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
-    const tomorrowDate = new Date(now); tomorrowDate.setDate(now.getDate() + 1);
-    const tomorrow = `${tomorrowDate.getFullYear()}-${tomorrowDate.getMonth()}-${tomorrowDate.getDate()}`;
-    const time = `${String(target.getHours()).padStart(2, "0")}:${String(target.getMinutes()).padStart(2, "0")}`;
-    if (targetDay === today) return `今天 ${time}`;
-    if (targetDay === tomorrow) return `明天 ${time}`;
+    const sameDay = target.toDateString() === now.toDateString();
+    const tomorrow = new Date(now); tomorrow.setDate(now.getDate() + 1);
+    const isTomorrow = target.toDateString() === tomorrow.toDateString();
+    const time = new Intl.DateTimeFormat(state.locale === "zh-CN" ? "zh-CN" : "en-US", { hour: "2-digit", minute: "2-digit", hour12: false }).format(target);
+    if (state.locale === "en-US") {
+      if (sameDay) return `Today ${time}`;
+      if (isTomorrow) return `Tomorrow ${time}`;
+      return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(target);
+    }
+    if (sameDay) return `今天 ${time}`;
+    if (isTomorrow) return `明天 ${time}`;
     return `${target.getMonth() + 1} 月 ${target.getDate()} 日 ${time}`;
   }
   function getActiveHoursLabel() { return `${state.settings.activeHourStart || "00:00"}–${state.settings.activeHourEnd || "00:00"}`; }
@@ -3108,7 +3178,7 @@
     });
   }
   function delay(ms) { return resilientDelay(ms); }
-  function toast(message, error = false) { const el = byId("xrc-toast"); el.textContent = message; el.className = error ? "error show" : "show"; clearTimeout(toast.timer); toast.timer = setTimeout(() => el.className = "", 3500); }
+  function toast(message, error = false) { const el = byId("xrc-toast"); el.textContent = localizeText(message); el.className = error ? "error show" : "show"; clearTimeout(toast.timer); toast.timer = setTimeout(() => el.className = "", 3500); }
   function isExtensionContextInvalidated(error) {
     return /extension context invalidated/i.test(String(error?.message || error || ""));
   }
@@ -3119,7 +3189,7 @@
     const jobBar = panel.querySelector("#xrc-jobbar");
     if (jobBar) {
       jobBar.classList.add("active");
-      jobBar.querySelector(".xrc-jobbar-primary").textContent = "扩展刚刚被重新加载，请刷新当前 X 页面后继续";
+      jobBar.querySelector(".xrc-jobbar-primary").textContent = localizeText("扩展刚刚被重新加载，请刷新当前 X 页面后继续");
       jobBar.querySelector(".xrc-jobbar-meta").hidden = true;
       jobBar.querySelector(":scope > div:last-child").innerHTML = "";
     }
