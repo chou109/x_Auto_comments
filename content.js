@@ -441,70 +441,72 @@
   }
 
   function fillForm() {
-    byId("xrc-authors").value = state.settings.authors;
-    byId("xrc-keywords").value = state.settings.keywords;
-    byId("xrc-target-urls").value = state.settings.targetUrls;
-    byId("xrc-direct-repeat-count").value = state.settings.directTargetRepeatCount;
-    byId("xrc-collect-limit").value = state.settings.accountCollectLimit;
-    byId("xrc-loop-mode").value = state.settings.loopMode;
-    byId("xrc-loop-total").value = state.settings.loopTotalLimit;
-    byId("xrc-loop-round").value = state.settings.loopRoundLimit;
-    byId("xrc-loop-interval").value = state.settings.loopRoundIntervalMinutes;
-    byId("xrc-loop-empty").value = state.settings.loopEmptyRoundLimit;
-    byId("xrc-likes").value = state.settings.minLikes;
-    byId("xrc-days").value = state.settings.maxAgeDays;
-    byId("xrc-sort").value = state.settings.sortBy;
-    byId("xrc-replies").checked = state.settings.excludeReplies;
-    byId("xrc-quotes").checked = state.settings.excludeQuotes;
-    byId("xrc-repeat").checked = state.settings.replyAlreadyReplied;
-    byId("xrc-strict-keyword").checked = state.settings.strictKeywordBody;
-    byId("xrc-key").value = state.settings.apiKey || "";
-    byId("xrc-base").value = state.settings.apiBase;
-    byId("xrc-model").value = state.settings.model;
-    byId("xrc-source").value = state.settings.replySource;
+    const setVal = (id, val) => { const el = byId(id); if (el) el.value = val; };
+    const setChk = (id, val) => { const el = byId(id); if (el) el.checked = val; };
+    setVal("xrc-authors", state.settings.authors);
+    setVal("xrc-keywords", state.settings.keywords);
+    setVal("xrc-target-urls", state.settings.targetUrls);
+    setVal("xrc-direct-repeat-count", state.settings.directTargetRepeatCount);
+    setVal("xrc-collect-limit", state.settings.accountCollectLimit);
+    setVal("xrc-loop-mode", state.settings.loopMode);
+    setVal("xrc-loop-total", state.settings.loopTotalLimit);
+    setVal("xrc-loop-round", state.settings.loopRoundLimit);
+    setVal("xrc-loop-interval", state.settings.loopRoundIntervalMinutes);
+    setVal("xrc-loop-empty", state.settings.loopEmptyRoundLimit);
+    setVal("xrc-likes", state.settings.minLikes);
+    setVal("xrc-days", state.settings.maxAgeDays);
+    setVal("xrc-sort", state.settings.sortBy);
+    setChk("xrc-replies", state.settings.excludeReplies);
+    setChk("xrc-quotes", state.settings.excludeQuotes);
+    setChk("xrc-repeat", state.settings.replyAlreadyReplied);
+    setChk("xrc-strict-keyword", state.settings.strictKeywordBody);
+    setVal("xrc-key", state.settings.apiKey || "");
+    setVal("xrc-base", state.settings.apiBase);
+    setVal("xrc-model", state.settings.model);
+    setVal("xrc-source", state.settings.replySource);
     renderSpecifiedRows(parseSpecifiedReplies(state.settings.specifiedReplies, false));
-    byId("xrc-specified-order").value = state.settings.specifiedReplyOrder;
-    byId("xrc-mode").value = state.settings.replyMode;
-    byId("xrc-prompt").value = state.settings.customPrompt;
-    byId("xrc-maxchars").value = state.settings.maxChars;
-    byId("xrc-suggestions").value = state.settings.suggestionCount;
-    byId("xrc-autocount").value = state.settings.autoReplyCount;
-    byId("xrc-delay").value = state.settings.autoDelaySeconds;
-    byId("xrc-delaymode").value = state.settings.delayMode;
-    byId("xrc-delay-min").value = state.settings.randomDelayMin;
-    byId("xrc-delay-max").value = state.settings.randomDelayMax;
-    byId("xrc-image-chance").value = state.settings.imageUseChance;
-    byId("xrc-image-count").value = clamp(state.settings.imageCount || 1, 1, 4, 1);
-    byId("xrc-image-selection").value = state.settings.imageSelectionMode || "random";
-    byId("xrc-active-hours-enabled").checked = state.settings.activeHoursEnabled;
-    byId("xrc-active-start").value = state.settings.activeHourStart;
-    byId("xrc-active-end").value = state.settings.activeHourEnd;
-    byId("xrc-reply-hour-limit").value = state.settings.replyHourlyLimit;
-    byId("xrc-reply-day-limit").value = state.settings.replyDailyLimit;
-    byId("xrc-failure-limit").value = state.settings.consecutiveFailureLimit;
-    byId("xrc-safeguards-enabled").checked = state.settings.safeguardsEnabled;
+    setVal("xrc-specified-order", state.settings.specifiedReplyOrder);
+    setVal("xrc-mode", state.settings.replyMode);
+    setVal("xrc-prompt", state.settings.customPrompt);
+    setVal("xrc-maxchars", state.settings.maxChars);
+    setVal("xrc-suggestions", state.settings.suggestionCount);
+    setVal("xrc-autocount", state.settings.autoReplyCount);
+    setVal("xrc-delay", state.settings.autoDelaySeconds);
+    setVal("xrc-delaymode", state.settings.delayMode);
+    setVal("xrc-delay-min", state.settings.randomDelayMin);
+    setVal("xrc-delay-max", state.settings.randomDelayMax);
+    setVal("xrc-image-chance", state.settings.imageUseChance);
+    setVal("xrc-image-count", clamp(state.settings.imageCount || 1, 1, 4, 1));
+    setVal("xrc-image-selection", state.settings.imageSelectionMode || "random");
+    setChk("xrc-active-hours-enabled", state.settings.activeHoursEnabled);
+    setVal("xrc-active-start", state.settings.activeHourStart);
+    setVal("xrc-active-end", state.settings.activeHourEnd);
+    setVal("xrc-reply-hour-limit", state.settings.replyHourlyLimit);
+    setVal("xrc-reply-day-limit", state.settings.replyDailyLimit);
+    setVal("xrc-failure-limit", state.settings.consecutiveFailureLimit);
+    setChk("xrc-safeguards-enabled", state.settings.safeguardsEnabled);
     renderImageLibrary();
-    byId("xrc-post-source").value = state.settings.postSource;
+    setVal("xrc-post-source", state.settings.postSource);
     renderPostContentRows(parseSpecifiedReplies(state.settings.postSpecifiedContents, false));
-    byId("xrc-post-specified-order").value = state.settings.postSpecifiedOrder;
-    byId("xrc-post-prompt").value = state.settings.postAiPrompt;
-    byId("xrc-post-maxchars").value = state.settings.postMaxChars;
-    byId("xrc-post-count").value = state.settings.autoPostCount;
-    byId("xrc-post-loop-enabled").checked = state.settings.postLoopEnabled;
-    byId("xrc-post-loop-total").value = state.settings.postLoopTotalLimit;
-    byId("xrc-post-loop-interval").value = state.settings.postLoopRoundIntervalMinutes;
-    byId("xrc-post-loop-empty").value = state.settings.postLoopEmptyRoundLimit;
-    byId("xrc-post-delaymode").value = state.settings.postDelayMode;
-    byId("xrc-post-delay").value = state.settings.postDelaySeconds;
-    byId("xrc-post-delay-min").value = state.settings.postRandomDelayMin;
-    byId("xrc-post-delay-max").value = state.settings.postRandomDelayMax;
-    byId("xrc-post-image-chance").value = state.settings.postImageUseChance;
-    byId("xrc-post-image-count").value = clamp(state.settings.postImageCount || 1, 1, 4, 1);
-    byId("xrc-post-image-selection").value = state.settings.postImageSelectionMode || "random";
-    byId("xrc-post-hour-limit").value = state.settings.postHourlyLimit;
-    byId("xrc-post-day-limit").value = state.settings.postDailyLimit;
-    byId("xrc-post-destination").value = state.settings.postDestination;
-    byId("xrc-post-community").value = state.settings.postCommunity;
+    setVal("xrc-post-specified-order", state.settings.postSpecifiedOrder);
+    setVal("xrc-post-prompt", state.settings.postAiPrompt);
+    setVal("xrc-post-maxchars", state.settings.postMaxChars);
+    setVal("xrc-post-count", state.settings.autoPostCount);
+    setChk("xrc-post-loop-enabled", state.settings.postLoopEnabled);
+    setVal("xrc-post-loop-total", state.settings.postLoopTotalLimit);
+    setVal("xrc-post-loop-interval", state.settings.postLoopRoundIntervalMinutes);
+    setVal("xrc-post-loop-empty", state.settings.postLoopEmptyRoundLimit);
+    setVal("xrc-post-delaymode", state.settings.postDelayMode);
+    setVal("xrc-post-delay", state.settings.postDelaySeconds);
+    setVal("xrc-post-delay-min", state.settings.postRandomDelayMin);
+    setVal("xrc-post-delay-max", state.settings.postRandomDelayMax);
+    setVal("xrc-post-image-chance", state.settings.postImageUseChance);
+    setVal("xrc-post-image-count", clamp(state.settings.postImageCount || 1, 1, 4, 1));
+    setVal("xrc-post-image-selection", state.settings.postImageSelectionMode || "random");
+    setVal("xrc-post-hour-limit", state.settings.postHourlyLimit);
+    setVal("xrc-post-day-limit", state.settings.postDailyLimit);
+    setVal("xrc-post-destination", state.settings.postDestination);
+    setVal("xrc-post-community", state.settings.postCommunity);
     renderPostImageLibrary();
     updateDelayModeUi();
     updateReplySourceUi();
@@ -3058,25 +3060,24 @@
         run: () => document.execCommand("insertHTML", false, escapeHtml(text))
       },
       {
-        name: "paste",
-        run: () => {
-          const transfer = new DataTransfer();
-          transfer.setData("text/plain", text);
-          return activeEditor.dispatchEvent(new ClipboardEvent("paste", {
-            bubbles: true, cancelable: true, composed: true, clipboardData: transfer
-          }));
+        name: "native-paste",
+        run: async () => {
+          try {
+            await navigator.clipboard.writeText(text);
+            return document.execCommand("paste");
+          } catch { return false; }
         }
       },
       {
-        name: "paste-retry",
+        name: "dom-fallback",
         run: () => {
-          const transfer = new DataTransfer();
-          transfer.setData("text/plain", text);
           activeEditor.focus();
-          selectEditorContents(activeEditor);
-          return activeEditor.dispatchEvent(new ClipboardEvent("paste", {
-            bubbles: true, cancelable: true, composed: true, clipboardData: transfer
-          }));
+          activeEditor.replaceChildren(document.createTextNode(text));
+          try { activeEditor.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: text })); } catch {}
+          const inputEvent = new InputEvent("input", { bubbles: true, cancelable: false, inputType: "insertText", data: text, composed: true });
+          activeEditor.dispatchEvent(inputEvent);
+          activeEditor.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
         }
       }
     ];
