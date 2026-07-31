@@ -76,6 +76,32 @@
   const POST_PROFILE_KEYS = ["postSource", "postSpecifiedContents", "postSpecifiedOrder", "postAiPrompt", "postMaxChars", "autoPostCount", "postDelayMode", "postDelaySeconds", "postRandomDelayMin", "postRandomDelayMax", "postImageUseChance", "postImageCount", "postImageSelectionMode", "postImageLibrary", "postDestination", "postCommunity", "postLoopEnabled", "postLoopTotalLimit", "postLoopRoundIntervalMinutes", "postLoopEmptyRoundLimit", "activeHoursEnabled", "activeHourStart", "activeHourEnd", "postHourlyLimit", "postDailyLimit", "consecutiveFailureLimit"];
   const state = { settings: { ...DEFAULTS }, locale: "zh-CN", tweets: [], selected: null, minimized: false, autoRunning: false, postRunning: false, autoStop: false, autoConfirm: false, autoStatus: "", collecting: false, collectStop: false, repliedUrls: new Set(), tabId: null, accountId: "unknown", taskBars: { "xrc-jobbar": null, "xrc-post-jobbar": null } };
   const delayWaiters = new Set();
+  const ownerInstanceId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const runningJobs = {};
+  function ownsJobFence(job) { return job?.ownerTabId === state.tabId && state.tabId != null; }
+  function makeRunId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`; }
+  async function readRunnableJob(storageKey) {
+    const latest = (await chrome.storage.local.get(storageKey))[storageKey];
+    if (!latest?.active) return null;
+    if (latest.paused) return null;
+    if (latest.ownerTabId != null && latest.ownerTabId !== state.tabId) return null;
+    if (!state.tabId) return null;
+    if (latest.accountId && latest.accountId !== "unknown" && state.accountId !== "unknown" && latest.accountId !== state.accountId) return null;
+    return latest;
+  }
+  async function commitJobMutation(storageKey, expectedRunId, mutate) {
+    const latest = await chrome.storage.local.get(storageKey);
+    const job = latest[storageKey];
+    if (!job?.active) return null;
+    if (job._runId && job._runId !== expectedRunId) return null;
+    if (job.ownerTabId != null && job.ownerTabId !== state.tabId) return null;
+    if (!state.tabId) return null;
+    const mutated = mutate(job);
+    if (!mutated) return null;
+    mutated._runId = expectedRunId;
+    await chrome.storage.local.set({ [storageKey]: mutated });
+    return mutated;
+  }
   const i18n = window.XRC_I18N;
   function localizeText(value) { return i18n?.text(value, state.locale) || String(value ?? ""); }
   function localizeError(error) { return i18n?.errorMessage(error, state.locale) || String(error?.message || error || "Unknown error"); }
@@ -1218,6 +1244,8 @@
   }
 
   async function stopReplyLoop() {
+    runningJobs["autoJob"] = null;
+    for (const wake of [...delayWaiters]) wake();
     const saved = await chrome.storage.local.get(["replyLoopJob", "autoJob", "collectJob"]);
     await chrome.storage.local.remove(["replyLoopJob", "collectJob"]);
     if (saved.autoJob?.loop) await chrome.storage.local.remove("autoJob");
@@ -1515,7 +1543,7 @@
     }
     const target = fromLoop ? Math.min(requestedTarget, candidates.length) : requestedTarget;
     const items = candidates.map(({ author, text, likes, views, ageHours, url, alreadyReplied }) => ({ author, text, likes, views, ageHours, url, alreadyReplied }));
-    const job = { active: true, paused: false, loop: Boolean(fromLoop), directMultiMode, items, requestedTarget, target, excludedAlreadyReplied: state.tweets.length - baseCandidates.length, current: 0, sent: 0, skipped: 0, returnUrl: location.href, allowRepeat: directMultiMode || state.settings.replyAlreadyReplied, replySource: state.settings.replySource, specifiedReplies: specified, specifiedReplyOrder: state.settings.specifiedReplyOrder, delayMode: state.settings.delayMode, delaySeconds: state.settings.autoDelaySeconds, randomDelayMin: state.settings.randomDelayMin, randomDelayMax: state.settings.randomDelayMax, imageUseChance: state.settings.imageUseChance, imageCount: state.settings.imageCount || 1, imageSelectionMode: state.settings.imageSelectionMode || "random", startedAt: Date.now(), ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000, failureStreak: 0 };
+    const job = { active: true, paused: false, loop: Boolean(fromLoop), directMultiMode, items, requestedTarget, target, excludedAlreadyReplied: state.tweets.length - baseCandidates.length, current: 0, sent: 0, skipped: 0, returnUrl: location.href, allowRepeat: directMultiMode || state.settings.replyAlreadyReplied, replySource: state.settings.replySource, specifiedReplies: specified, specifiedReplyOrder: state.settings.specifiedReplyOrder, delayMode: state.settings.delayMode, delaySeconds: state.settings.autoDelaySeconds, randomDelayMin: state.settings.randomDelayMin, randomDelayMax: state.settings.randomDelayMax, imageUseChance: state.settings.imageUseChance, imageCount: state.settings.imageCount || 1, imageSelectionMode: state.settings.imageSelectionMode || "random", startedAt: Date.now(), ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000, failureStreak: 0, _runId: makeRunId() };
     state.autoStatus = `正在创建 ${job.target} 条自动回复任务 · ${delayDescription}`; renderList();
     await chrome.storage.local.set({ autoJob: job });
     location.href = items[0].url;
@@ -1523,121 +1551,179 @@
 
   async function resumeAutoJob(job) {
     if (!job?.active || !job.items?.length) return;
-    if (!await claimJobLease(job, "autoJob")) return;
-    state.autoRunning = true;
-    updateJobLoopActions(Boolean(job.loop));
-    const resumedAtStart = await waitUntilJobResumed(job);
-    if (!resumedAtStart) return;
-    Object.assign(job, resumedAtStart);
-    const target = job.target || job.items.length;
-    job.skipped = job.skipped || 0;
-    showJobBar(`目标 ${target} 条 · 已发送 ${job.sent} · 已跳过 ${job.skipped}`);
-    const tweet = job.items[job.current];
-    if (!tweet || job.sent >= target) return finishAutoJob(job, `任务完成，共发送 ${job.sent} 条`);
-    if (!location.href.includes(new URL(tweet.url).pathname)) { await navigateAutoJob(job, tweet.url); return; }
-    const repeatProgress = tweet.directRepeatTotal ? ` · 当前帖子第 ${tweet.directRepeatIndex}/${tweet.directRepeatTotal} 条` : "";
-    showJobBar(`目标发送 ${target} 条 · 候选 ${job.current + 1}/${job.items.length}${repeatProgress} · 已发送 ${job.sent} · 已跳过 ${job.skipped}`);
-    const pageReady = await waitForTweetPage(tweet, 30000);
-    if (!pageReady) {
-      tweet.loadRetries = (tweet.loadRetries || 0) + 1;
-      await chrome.storage.local.set({ autoJob: job });
-      if (tweet.loadRetries <= 2) {
-        showJobBar(`帖子加载超时，正在重试 ${tweet.loadRetries}/2…`);
-        await delay(1000);
-        location.reload();
-        return;
+    // Local runner gate: prevent duplicate concurrent runners for the same job.
+    if (runningJobs["autoJob"]) return;
+    runningJobs["autoJob"] = true;
+    try {
+      if (!await claimJobLease(job, "autoJob")) { runningJobs["autoJob"] = null; return; }
+      state.autoRunning = true;
+      const myRunId = job._runId;
+      updateJobLoopActions(Boolean(job.loop));
+      const resumedAtStart = await waitUntilJobResumed(job);
+      if (!resumedAtStart) { runningJobs["autoJob"] = null; return; }
+      if (resumedAtStart._runId !== myRunId) { runningJobs["autoJob"] = null; return; }
+      Object.assign(job, resumedAtStart);
+      const target = job.target || job.items.length;
+      job.skipped = job.skipped || 0;
+      showJobBar(`目标 ${target} 条 · 已发送 ${job.sent} · 已跳过 ${job.skipped}`);
+      const tweet = job.items[job.current];
+      if (!tweet || job.sent >= target) return finishAutoJob(job, `任务完成，共发送 ${job.sent} 条`);
+      if (!location.href.includes(new URL(tweet.url).pathname)) { await navigateAutoJob(job, tweet.url); runningJobs["autoJob"] = null; return; }
+      const repeatProgress = tweet.directRepeatTotal ? ` · 当前帖子第 ${tweet.directRepeatIndex}/${tweet.directRepeatTotal} 条` : "";
+      showJobBar(`目标发送 ${target} 条 · 候选 ${job.current + 1}/${job.items.length}${repeatProgress} · 已发送 ${job.sent} · 已跳过 ${job.skipped}`);
+      const pageReady = await waitForTweetPage(tweet, 30000);
+      if (!pageReady) {
+        if (!runningJobs["autoJob"]) return;
+        tweet.loadRetries = (tweet.loadRetries || 0) + 1;
+        await chrome.storage.local.set({ autoJob: job });
+        if (tweet.loadRetries <= 2) {
+          showJobBar(`帖子加载超时，正在重试 ${tweet.loadRetries}/2…`);
+          await delay(1000);
+          location.reload();
+          runningJobs["autoJob"] = null; return;
+        }
+        return advanceSkippedJob(job, "帖子连续加载失败");
       }
-      return advanceSkippedJob(job, "帖子连续加载失败");
-    }
-    tweet.loadRetries = 0;
-    Object.assign(tweet, readCurrentTweet(tweet));
-    const resumedAfterLoad = await waitUntilJobResumed(job);
-    if (!resumedAfterLoad) return;
-    Object.assign(job, resumedAfterLoad);
-    if (!job.allowRepeat && await hasExistingReply(tweet)) {
-      await rememberReplied(tweet.url);
-      return advanceSkippedJob(job, "检测到已经回复过");
-    }
-    if (!job.directMultiMode && job.verifyCurrentBeforeRetry && await hasExistingReply(tweet)) {
-      job.verifyCurrentBeforeRetry = false;
-      await chrome.storage.local.set({ autoJob: job });
-      await rememberReplied(tweet.url);
-      return advanceSkippedJob(job, "恢复任务时检测到当前帖子已经发送成功");
-    }
-    const result = job.replySource === "specified" ? { replies: job.specifiedReplies } : (tweet.preparedReplies?.length ? { replies: tweet.preparedReplies } : await sendAi(tweet, 1));
-    // suggestionCount only limits AI suggestions. Specified replies are an
-    // explicit pool and must all remain available for rotation/random choice.
-    const replyPool = Array.isArray(result?.replies) ? result.replies : [];
-    const replies = (job.replySource === "specified" ? replyPool : replyPool.slice(0, state.settings.suggestionCount))
-      .map((reply) => fitReply(reply, state.settings.maxChars));
-    if (!replies.length) return advanceSkippedJob(job, "回复内容生成失败");
-    const resumedAfterGeneration = await waitUntilJobResumed(job);
-    if (!resumedAfterGeneration) return;
-    Object.assign(job, resumedAfterGeneration);
-    state.tweets = [{ ...tweet, replies }];
-    let replyIndex = job.sent % replies.length;
-    if (job.replySource === "specified" && job.specifiedReplyOrder === "random") {
-      const previous = Number.isInteger(job.lastSpecifiedReplyIndex) ? job.lastSpecifiedReplyIndex : -1;
-      if (replies.length > 1) {
-        const offset = Math.floor(Math.random() * (replies.length - 1)) + 1;
-        replyIndex = (previous + offset + replies.length) % replies.length;
-      } else {
-        replyIndex = 0;
+      if (!runningJobs["autoJob"]) return;
+      tweet.loadRetries = 0;
+      Object.assign(tweet, readCurrentTweet(tweet));
+      const resumedAfterLoad = await waitUntilJobResumed(job);
+      if (!resumedAfterLoad || resumedAfterLoad._runId !== myRunId) { runningJobs["autoJob"] = null; return; }
+      Object.assign(job, resumedAfterLoad);
+      if (!runningJobs["autoJob"]) return;
+      if (!job.allowRepeat && await hasExistingReply(tweet)) {
+        await rememberReplied(tweet.url);
+        return advanceSkippedJob(job, "检测到已经回复过");
       }
-      job.lastSpecifiedReplyIndex = replyIndex;
-      await chrome.storage.local.set({ autoJob: job });
+      if (!job.directMultiMode && job.verifyCurrentBeforeRetry && await hasExistingReply(tweet)) {
+        if (!runningJobs["autoJob"]) return;
+        job.verifyCurrentBeforeRetry = false;
+        await chrome.storage.local.set({ autoJob: job });
+        await rememberReplied(tweet.url);
+        return advanceSkippedJob(job, "恢复任务时检测到当前帖子已经发送成功");
+      }
+      if (!runningJobs["autoJob"]) return;
+      const result = job.replySource === "specified" ? { replies: job.specifiedReplies } : (tweet.preparedReplies?.length ? { replies: tweet.preparedReplies } : await sendAi(tweet, 1));
+      if (!runningJobs["autoJob"]) return;
+      const replyPool = Array.isArray(result?.replies) ? result.replies : [];
+      const replies = (job.replySource === "specified" ? replyPool : replyPool.slice(0, state.settings.suggestionCount))
+        .map((reply) => fitReply(reply, state.settings.maxChars));
+      if (!replies.length) return advanceSkippedJob(job, "回复内容生成失败");
+      const resumedAfterGeneration = await waitUntilJobResumed(job);
+      if (!resumedAfterGeneration || resumedAfterGeneration._runId !== myRunId) { runningJobs["autoJob"] = null; return; }
+      Object.assign(job, resumedAfterGeneration);
+      if (!runningJobs["autoJob"]) return;
+      state.tweets = [{ ...tweet, replies }];
+      let replyIndex = job.sent % replies.length;
+      if (job.replySource === "specified" && job.specifiedReplyOrder === "random") {
+        const previous = Number.isInteger(job.lastSpecifiedReplyIndex) ? job.lastSpecifiedReplyIndex : -1;
+        if (replies.length > 1) {
+          const offset = Math.floor(Math.random() * (replies.length - 1)) + 1;
+          replyIndex = (previous + offset + replies.length) % replies.length;
+        } else {
+          replyIndex = 0;
+        }
+        job.lastSpecifiedReplyIndex = replyIndex;
+        if (!runningJobs["autoJob"]) return;
+        await chrome.storage.local.set({ autoJob: job });
+      }
+      const filled = await fillReply(0, replyIndex);
+      if (filled === "restricted") return advanceSkippedJob(job, "该帖子仅允许部分账号回复");
+      if (!filled?.ok) return retryCurrentStep(job, tweet, "fillRetries", filled?.reason || "回复框填入失败", 2);
+      if (!runningJobs["autoJob"]) return;
+      const resumedBeforeSend = await waitUntilJobResumed(job);
+      if (!resumedBeforeSend || resumedBeforeSend._runId !== myRunId) { runningJobs["autoJob"] = null; return; }
+      Object.assign(job, resumedBeforeSend);
+      if (!runningJobs["autoJob"]) return;
+      await maybeAttachRandomImage(job, filled.editor);
+      if (!runningJobs["autoJob"]) return;
+      let activeEditor = filled.editor?.isConnected ? filled.editor : findReplyEditor();
+      const expectedText = filled.text;
+      if (!editorTextMatches(readEditorText(activeEditor), expectedText)) {
+        showJobBar("图片已载入，正在恢复回复文字…");
+        const restored = await replaceEditorText(activeEditor, expectedText);
+        activeEditor = restored.editor;
+        if (!restored.complete) return retryCurrentStep(job, tweet, "fillRetries", "图片载入后回复文字丢失", 2);
+      }
+      // Strict composer-bound send-button discovery: no document fallback.
+      const sendButton = await waitForStrictSendButton(15000, activeEditor);
+      if (!sendButton) return retryCurrentStep(job, tweet, "buttonRetries", "发送按钮不在当前回复框中", 2);
+      if (!runningJobs["autoJob"]) return;
+      const resumedAfterMedia = await waitUntilJobResumed(job);
+      if (!resumedAfterMedia || resumedAfterMedia._runId !== myRunId) { runningJobs["autoJob"] = null; return; }
+      Object.assign(job, resumedAfterMedia);
+      if (!runningJobs["autoJob"]) return;
+      if (!await waitForSendWindow("reply", job, "autoJob")) { runningJobs["autoJob"] = null; return; }
+      // Final pre-click fence: re-read job, verify not paused, same runId, editor still connected.
+      const freshJob = (await chrome.storage.local.get("autoJob")).autoJob;
+      if (!freshJob?.active || freshJob.paused || freshJob._runId !== myRunId || !freshJob.ownerTabId || freshJob.ownerTabId !== state.tabId) { runningJobs["autoJob"] = null; return; }
+      if (!activeEditor?.isConnected) { runningJobs["autoJob"] = null; return; }
+      if (!scopeContainsElement(activeEditor, sendButton)) { runningJobs["autoJob"] = null; return retryCurrentStep(job, tweet, "buttonRetries", "发送按钮已脱离回复框", 1); }
+      if (!editorTextMatches(readEditorText(activeEditor), expectedText)) { runningJobs["autoJob"] = null; return retryCurrentStep(job, tweet, "fillRetries", "回复文字在发送前被清空", 1); }
+      const button = findSendButtonStrict(activeEditor);
+      if (!button) { runningJobs["autoJob"] = null; return retryCurrentStep(job, tweet, "buttonRetries", "发送按钮在发送前失效", 1); }
+      button.click();
+      showJobBar(`正在确认第 ${job.sent + 1}/${target} 条是否发送成功…`);
+      const submission = await waitForReplySubmission(30000, expectedText);
+      if (!runningJobs["autoJob"]) return;
+      if (submission === "duplicate") return advanceSkippedJob(job, "X 提示这条回复已经发送过");
+      if (submission !== "sent") {
+        job.verifyCurrentBeforeRetry = !job.directMultiMode;
+        const reason = submission === "failed" ? "X 返回发送失败" : "发送结果暂时无法确认";
+        return retryCurrentStep(job, tweet, "submitRetries", reason, 2);
+      }
+      // Commit the sent item using fresh storage read to avoid overwriting pause.
+      if (!runningJobs["autoJob"]) return;
+      const committed = await commitJobMutation("autoJob", myRunId, (latest) => {
+        tweet.fillRetries = 0; tweet.buttonRetries = 0; tweet.submitRetries = 0;
+        latest.sent = (latest.sent || 0) + 1;
+        latest.current = (latest.current || 0) + 1;
+        latest.failureStreak = 0;
+        // Copy over job fields that may have updated in memory (preparedReplies, etc.)
+        if (job.items?.[latest.current]) {
+          job.items[latest.current].preparedReplies = null;
+        }
+        return latest;
+      });
+      if (!committed) { runningJobs["autoJob"] = null; return; }
+      Object.assign(job, committed);
+      await recordSuccessfulSend("reply");
+      await rememberReplied(tweet.url);
+      const waitSeconds = chooseJobDelay(job);
+      showJobBar(`已发送 ${job.sent}/${target}，等待 ${waitSeconds} 秒；同时预生成下一条…`);
+      await delay(500);
+      if (!runningJobs["autoJob"]) return;
+      if (job.sent >= target || job.current >= job.items.length) return finishAutoJob(job, `任务完成，共发送 ${job.sent} 条`);
+      const nextTweet = job.items[job.current];
+      const [nextResult] = job.replySource === "ai" ? await Promise.all([sendAi(nextTweet, 1), waitJobDelay(job, waitSeconds)]) : [null, await waitJobDelay(job, waitSeconds)];
+      if (!runningJobs["autoJob"]) return;
+      const latest = await chrome.storage.local.get("autoJob");
+      if (!latest.autoJob?.active) { runningJobs["autoJob"] = null; return; }
+      Object.assign(job, latest.autoJob);
+      if (Array.isArray(nextResult?.replies) && nextResult.replies.length) {
+        job.items[job.current].preparedReplies = nextResult.replies.slice(0, state.settings.suggestionCount).map((reply) => fitReply(reply, state.settings.maxChars));
+        await chrome.storage.local.set({ autoJob: job });
+      }
+      await navigateAutoJob(job, job.items[job.current].url);
+    } finally {
+      runningJobs["autoJob"] = null;
     }
-    const filled = await fillReply(0, replyIndex);
-    if (filled === "restricted") return advanceSkippedJob(job, "该帖子仅允许部分账号回复");
-    if (!filled?.ok) return retryCurrentStep(job, tweet, "fillRetries", filled?.reason || "回复框填入失败", 2);
-    const resumedBeforeSend = await waitUntilJobResumed(job);
-    if (!resumedBeforeSend) return;
-    Object.assign(job, resumedBeforeSend);
-    await maybeAttachRandomImage(job, filled.editor);
-    let activeEditor = filled.editor?.isConnected ? filled.editor : findReplyEditor();
-    if (!editorTextMatches(readEditorText(activeEditor), filled.text)) {
-      showJobBar("图片已载入，正在恢复回复文字…");
-      const restored = await replaceEditorText(activeEditor, filled.text);
-      activeEditor = restored.editor;
-      if (!restored.complete) return retryCurrentStep(job, tweet, "fillRetries", "图片载入后回复文字丢失", 2);
+  }
+  // Strict button wait used only by the automatic send path.
+  async function waitForStrictSendButton(timeoutMs, editor) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!editor?.isConnected) return null;
+      const button = findSendButtonStrict(editor);
+      if (button) return button;
+      await delay(250);
     }
-    const sendButton = await waitForEnabledSendButton(15000, activeEditor);
-    if (!sendButton || sendButton.getAttribute("aria-disabled") === "true") return retryCurrentStep(job, tweet, "buttonRetries", "发送按钮暂时不可用", 2);
-    const resumedAfterMedia = await waitUntilJobResumed(job);
-    if (!resumedAfterMedia) return;
-    Object.assign(job, resumedAfterMedia);
-    if (!await waitForSendWindow("reply", job, "autoJob")) return;
-    sendButton.click();
-    showJobBar(`正在确认第 ${job.sent + 1}/${target} 条是否发送成功…`);
-    const submission = await waitForReplySubmission(30000, filled.text);
-    if (submission === "duplicate") return advanceSkippedJob(job, "X 提示这条回复已经发送过");
-    if (submission !== "sent") {
-      job.verifyCurrentBeforeRetry = !job.directMultiMode;
-      const reason = submission === "failed" ? "X 返回发送失败" : "发送结果暂时无法确认";
-      return retryCurrentStep(job, tweet, "submitRetries", reason, 2);
-    }
-    tweet.fillRetries = 0; tweet.buttonRetries = 0; tweet.submitRetries = 0;
-    job.sent += 1; job.current += 1;
-    job.failureStreak = 0;
-    await recordSuccessfulSend("reply");
-    await rememberReplied(tweet.url);
-    await chrome.storage.local.set({ autoJob: job });
-    const waitSeconds = chooseJobDelay(job);
-    showJobBar(`已发送 ${job.sent}/${target}，等待 ${waitSeconds} 秒；同时预生成下一条…`);
-    await delay(500);
-    if (job.sent >= target || job.current >= job.items.length) return finishAutoJob(job, `任务完成，共发送 ${job.sent} 条`);
-    const nextTweet = job.items[job.current];
-    const [nextResult] = job.replySource === "ai" ? await Promise.all([sendAi(nextTweet, 1), waitJobDelay(job, waitSeconds)]) : [null, await waitJobDelay(job, waitSeconds)];
-    const latest = await chrome.storage.local.get("autoJob");
-    if (!latest.autoJob?.active) return;
-    if (Array.isArray(nextResult?.replies) && nextResult.replies.length) {
-      job.items[job.current].preparedReplies = nextResult.replies.slice(0, state.settings.suggestionCount).map((reply) => fitReply(reply, state.settings.maxChars));
-      await chrome.storage.local.set({ autoJob: job });
-    }
-    await navigateAutoJob(job, job.items[job.current].url);
+    return null;
   }
 
   async function cancelAutoJob() {
+    runningJobs["autoJob"] = null;
+    for (const wake of [...delayWaiters]) wake();
     const saved = await chrome.storage.local.get("autoJob");
     const job = saved.autoJob;
     await chrome.storage.local.remove("autoJob");
@@ -1676,11 +1762,20 @@
   }
 
   async function setAutoJobPaused(paused) {
+    if (paused) {
+      // Invalidate the current runner BEFORE storage I/O so any in-flight
+      // continuation after an await returns immediately.
+      runningJobs["autoJob"] = null;
+      for (const wake of [...delayWaiters]) wake();
+    }
     const saved = await chrome.storage.local.get("autoJob");
     const job = saved.autoJob;
     if (!job?.active) return toast("当前没有正在运行的自动回复任务", true);
     job.paused = Boolean(paused);
-    if (job.paused) { delete job.waitState; delete job.nextRunAt; }
+    if (job.paused) {
+      delete job.waitState; delete job.nextRunAt;
+      job._runId = makeRunId();
+    }
     const shouldRestart = !job.paused && !state.autoRunning;
     if (!job.paused) {
       job.needsRestart = false;
@@ -1707,10 +1802,14 @@
     tweet[counterKey] = (tweet[counterKey] || 0) + 1;
     await chrome.storage.local.set({ autoJob: job });
     if (tweet[counterKey] <= maxRetries) {
+      if (!runningJobs["autoJob"]) return;
       showJobBar(`${reason}，正在当前页面自动恢复 ${tweet[counterKey]}/${maxRetries}…`);
       await resilientDelay(1200);
+      if (!runningJobs["autoJob"]) return;
       state.autoRunning = false;
-      return resumeAutoJob(job);
+      const fresh = (await chrome.storage.local.get("autoJob")).autoJob;
+      if (!fresh?.active || fresh.paused || !fresh.ownerTabId || fresh.ownerTabId !== state.tabId) return;
+      return resumeAutoJob(fresh);
     }
     tweet[counterKey] = 0;
     job.verifyCurrentBeforeRetry = false;
@@ -1723,9 +1822,12 @@
   }
 
   async function pauseAutoJobWithReason(job, reason) {
+    runningJobs["autoJob"] = null;
+    for (const wake of [...delayWaiters]) wake();
     job.paused = true;
     delete job.waitState;
     delete job.nextRunAt;
+    job._runId = makeRunId();
     job.lastSkipReason = reason;
     await chrome.storage.local.set({ autoJob: job });
     state.autoRunning = false;
@@ -1849,6 +1951,38 @@
     // /compose/post is not always rendered inside role=dialog. Include both X
     // button variants globally as a final fallback, preferring an enabled one.
     return rankButtons([...document.querySelectorAll(selector)])[0] || null;
+  }
+  // Automatic-send path: only picks a send button inside the verified composer.
+  function findSendButtonStrict(editor) {
+    if (!editor?.isConnected) return null;
+    const selector = '[data-testid="tweetButton"], [data-testid="tweetButtonInline"]';
+    const composer = findComposerContainer(editor);
+    const dialog = editor.closest('[role="dialog"]');
+    const scopes = [...new Set([composer, dialog].filter(Boolean))];
+    for (const scope of scopes) {
+      const buttons = [...scope.querySelectorAll(selector)].filter(isVisibleElement);
+      const enabled = buttons.find((b) => b.getAttribute("aria-disabled") !== "true" && !b.disabled);
+      if (enabled) return enabled;
+    }
+    return null;
+  }
+  function findComposerFileInput(editor) {
+    if (!editor?.isConnected) return null;
+    const composer = findComposerContainer(editor);
+    const dialog = editor.closest('[role="dialog"]');
+    const scopes = [...new Set([composer, dialog].filter(Boolean))];
+    const fileSel = 'input[data-testid="fileInput"][type="file"], input[type="file"][accept*="image"]';
+    for (const scope of scopes) {
+      const input = scope.querySelector(fileSel);
+      if (input) return input;
+    }
+    return null;
+  }
+  function scopeContainsElement(editor, child) {
+    if (!editor?.isConnected || !child?.isConnected) return false;
+    const composer = findComposerContainer(editor);
+    const dialog = editor.closest('[role="dialog"]');
+    return composer?.contains(child) || dialog?.contains(child) || false;
   }
   async function hasExistingReply(tweet) {
     const key = normalizeTweetUrl(tweet.url);
@@ -2440,11 +2574,15 @@
     }
   }
   async function setPostJobPaused(paused) {
+    if (paused) {
+      runningJobs["postJob"] = null;
+      for (const wake of [...delayWaiters]) wake();
+    }
     const saved = await chrome.storage.local.get("postJob");
     const job = saved.postJob;
     if (!job?.active) return toast("当前没有自动发帖任务", true);
     job.paused = Boolean(paused);
-    if (job.paused) { delete job.waitState; delete job.nextRunAt; }
+    if (job.paused) { delete job.waitState; delete job.nextRunAt; job._runId = makeRunId(); }
     if (!job.paused) job.retries = 0;
     await chrome.storage.local.set({ postJob: job });
     for (const wake of [...delayWaiters]) wake();
@@ -2453,9 +2591,12 @@
     if (!job.paused && !state.postRunning) resumePostJob(job);
   }
   async function pausePostJobWithReason(job, reason) {
+    runningJobs["postJob"] = null;
+    for (const wake of [...delayWaiters]) wake();
     job.paused = true;
     delete job.waitState;
     delete job.nextRunAt;
+    job._runId = makeRunId();
     job.lastReason = reason;
     await chrome.storage.local.set({ postJob: job });
     state.postRunning = false;
@@ -2480,9 +2621,9 @@
       showPostJobBar(`${reason}，正在重试 ${job.retries}/${maxRetries}…`);
       await delay(1200);
       state.postRunning = false;
-      // Retry in the same composer. Reloading with a draft opens the browser's
-      // "changes may not be saved" dialog and suspends the automation.
-      return resumePostJob(job);
+      const fresh = (await chrome.storage.local.get("postJob")).postJob;
+      if (!fresh?.active || fresh.paused) return;
+      return resumePostJob(fresh);
     }
     job.skipped = (job.skipped || 0) + 1;
     job.current += 1;
@@ -2491,6 +2632,8 @@
     return pausePostJobWithReason(job, `${reason}，连续重试失败；已暂停供检查`);
   }
   async function cancelPostJob() {
+    runningJobs["postJob"] = null;
+    for (const wake of [...delayWaiters]) wake();
     const saved = await chrome.storage.local.get("postJob");
     const job = saved.postJob;
     await chrome.storage.local.remove("postJob");
@@ -2600,21 +2743,15 @@
     }
     if (!selected.length) return false;
 
-    // 查找文件输入框：优先在当前编辑器容器内查找，失败则全局查找
-    // X 的回复框里文件 input 有时不在 composer 内，且可能需要点击图片按钮才会创建
+    // 查找文件输入框：只在当前编辑器所属 composer/dialog 范围内查找，避免跨 composer 附加图片
     const editor = targetEditor?.isConnected ? targetEditor : findReplyEditor();
     const composer = findComposerContainer(editor);
-    const fileSel = 'input[data-testid="fileInput"][type="file"], input[type="file"][accept*="image"]';
-    let input = (composer || document).querySelector(fileSel) || document.querySelector(fileSel);
+    if (!editor || !composer) { toast(`未找到${label}回复框，本条使用纯文字`, true); return false; }
+    let input = findComposerFileInput(editor);
     if (!input) {
-      // 尝试点击图片/媒体按钮来创建 file input
-      const mediaBtn = findMediaButton(composer || editor);
-      if (mediaBtn) { mediaBtn.click(); await delay(600); }
-      input = (composer || document).querySelector(fileSel) || document.querySelector(fileSel);
-    }
-    if (!input) {
-      // 最后尝试：寻找任何与媒体上传相关的 input
-      input = document.querySelector('input[type="file"]');
+      const mediaBtn = findMediaButton(composer);
+      if (mediaBtn) { mediaBtn.click(); await delay(700); }
+      input = findComposerFileInput(editor);
     }
     if (!input) { toast(`未找到${label}图片控件，本条使用纯文字`, true); return false; }
 
@@ -2628,11 +2765,23 @@
       input.files = transfer.files;
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
-      return waitForMediaReady(20000, editor);
+      return waitForMediaReadyStrict(20000, editor);
     } catch (error) {
       toast(`${label}图片添加失败，本条使用纯文字：${error.message}`, true);
       return false;
     }
+  }
+  async function waitForMediaReadyStrict(timeoutMs, targetEditor) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const editor = targetEditor?.isConnected ? targetEditor : findReplyEditor();
+      if (!editor) return false;
+      const preview = findComposerMediaPreview(editor);
+      const button = findSendButtonStrict(editor);
+      if (preview && button) return true;
+      await delay(300);
+    }
+    return false;
   }
   function renderImageLibrary() {
     const list = byId("xrc-image-list");
@@ -2692,24 +2841,13 @@
   }
   async function waitForReplySubmission(timeoutMs, expectedText) {
     const deadline = Date.now() + timeoutMs;
-    let stableEmptyChecks = 0;
-    await delay(500);
+    await delay(600);
     while (Date.now() < deadline) {
       const pageText = String(document.querySelector("main")?.innerText || "");
       if (/你已经发过了|you(?:'ve| have)? already (?:sent|posted)/i.test(pageText)) return "duplicate";
       if (hasRecentMatchingReply(expectedText)) return "sent";
       if (/出错了.{0,30}(?:再试一次|try again)|something went wrong/i.test(pageText)) return "failed";
-      const editor = findReplyEditor();
-      const composer = findComposerContainer(editor);
-      const text = readEditorText(editor);
-      const media = composer?.querySelector('[data-testid="attachments"], [data-testid="removeMedia"], [data-testid="mediaPreview"], img[src^="blob:"]');
-      if (!editor || (!text && !media)) {
-        stableEmptyChecks += 1;
-        if (stableEmptyChecks >= 3) return "sent";
-      } else {
-        stableEmptyChecks = 0;
-      }
-      await delay(300);
+      await delay(400);
     }
     return "timeout";
   }
@@ -3120,15 +3258,25 @@
   }
   async function claimJobLease(job, storageKey) {
     if (!job?.active) return false;
-    if (job.accountId && job.accountId !== "unknown" && state.accountId !== job.accountId) return false;
+    if (!state.tabId) return false;
+    // Read the freshest stored job to avoid using a stale in-memory object.
+    const stored = await chrome.storage.local.get(storageKey);
+    const latest = stored[storageKey];
+    if (!latest?.active) return false;
+    if (latest.paused) return false;
+    if (latest.accountId && latest.accountId !== "unknown" && state.accountId !== latest.accountId) return false;
     const now = Date.now();
-    if (job.ownerTabId != null && job.ownerTabId !== state.tabId && Number(job.leaseUntil || 0) > now) return false;
-    job.accountId = job.accountId || state.accountId;
-    job.ownerTabId = state.tabId;
-    job.leaseUntil = now + 90000;
-    job.lastHeartbeatAt = now;
-    await chrome.storage.local.set({ [storageKey]: job });
-    chrome.runtime.sendMessage({ type: "XRC_REGISTER_JOB", storageKey, accountId: job.accountId }).catch(() => {});
+    if (latest.ownerTabId != null && latest.ownerTabId !== state.tabId && latest._ownerInstance !== ownerInstanceId && Number(latest.leaseUntil || 0) > now) return false;
+    latest.accountId = latest.accountId || state.accountId;
+    latest.ownerTabId = state.tabId;
+    latest._ownerInstance = ownerInstanceId;
+    latest.leaseUntil = now + 90000;
+    latest.lastHeartbeatAt = now;
+    if (!latest._runId) latest._runId = makeRunId();
+    await chrome.storage.local.set({ [storageKey]: latest });
+    // Update the caller's job reference with the committed version.
+    Object.assign(job, latest);
+    chrome.runtime.sendMessage({ type: "XRC_REGISTER_JOB", storageKey, accountId: latest.accountId }).catch(() => {});
     return true;
   }
   async function renewOwnedLeases() {
@@ -3137,17 +3285,30 @@
     const updates = {};
     for (const key of keys) {
       const job = stored[key];
-      if (!job?.active || job.ownerTabId !== state.tabId) continue;
-      job.leaseUntil = Date.now() + 90000;
-      job.lastHeartbeatAt = Date.now();
-      updates[key] = job;
+      if (!job?.active) continue;
+      if (job.paused) continue;
+      if (job.ownerTabId !== state.tabId || job._ownerInstance !== ownerInstanceId) continue;
+      updates[key] = { leaseUntil: Date.now() + 90000, lastHeartbeatAt: Date.now() };
     }
-    if (Object.keys(updates).length) await chrome.storage.local.set(updates);
+    if (Object.keys(updates).length) {
+      // Mutate only lease fields using a narrow merge write.
+      const current = await chrome.storage.local.get(Object.keys(updates));
+      for (const key of Object.keys(updates)) {
+        if (current[key]?.active && !current[key]?.paused && current[key]?.ownerTabId === state.tabId && current[key]?._ownerInstance === ownerInstanceId) {
+          current[key].leaseUntil = updates[key].leaseUntil;
+          current[key].lastHeartbeatAt = updates[key].lastHeartbeatAt;
+        } else {
+          delete current[key];
+        }
+      }
+      if (Object.keys(current).length) await chrome.storage.local.set(current);
+    }
   }
   function ownsJob(job) {
     if (!job?.active) return false;
+    if (!state.tabId) return false;
     if (job.accountId && job.accountId !== "unknown" && state.accountId !== "unknown" && job.accountId !== state.accountId) return false;
-    return job.ownerTabId == null || state.tabId == null || job.ownerTabId === state.tabId || Number(job.leaseUntil || 0) <= Date.now();
+    return job.ownerTabId == null || job.ownerTabId === state.tabId || Number(job.leaseUntil || 0) <= Date.now();
   }
   async function restorePersistedJobIfIdle() {
     if (state.autoRunning || state.postRunning || state.collecting) return;

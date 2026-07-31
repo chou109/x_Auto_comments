@@ -71,7 +71,7 @@ async function wakeActiveJobTabs() {
   const tabIds = new Set();
   for (const key of jobKeys) {
     const job = storedJobs[key];
-    if (!job?.active) continue;
+    if (!job?.active || job.paused) continue;
     if (Number.isInteger(job.ownerTabId)) tabIds.add(job.ownerTabId);
     else if (Number.isInteger(registered[key]?.tabId)) tabIds.add(registered[key].tabId);
   }
