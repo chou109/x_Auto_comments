@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "X Reply Copilot",
+  "version": "0.20.4",
+  "description": "Filter X posts, generate or select replies, and run posting tasks.",
+  "permissions": ["storage", "unlimitedStorage", "alarms", "tabs"],
+  "host_permissions": [
+    "https://api.openai.com/*",
+    "https://x.com/*",
+    "https://twitter.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "X Reply Copilot"
+  }
+}
