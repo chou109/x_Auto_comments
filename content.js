@@ -2891,17 +2891,36 @@
     }
     return false;
   }
-  async function waitForReplySubmission(timeoutMs, expectedText) {
+  async function waitForReplySubmission(timeoutMs, expectedText, allowRecentOwnPost = true) {
     const deadline = Date.now() + timeoutMs;
-    await delay(600);
+    const sendTime = Date.now();
+    await delay(800);
     while (Date.now() < deadline) {
       const pageText = String(document.querySelector("main")?.innerText || "");
       if (/你已经发过了|you(?:'ve| have)? already (?:sent|posted)/i.test(pageText)) return "duplicate";
       if (hasRecentMatchingReply(expectedText)) return "sent";
       if (/出错了.{0,30}(?:再试一次|try again)|something went wrong/i.test(pageText)) return "failed";
+      // After 8s without full-text match, accept any recent self-post as sent.
+      if (allowRecentOwnPost && Date.now() - sendTime > 8000 && hasAnyRecentOwnPost(30000)) {
+        const editor = findReplyEditor();
+        if (!editor || !readEditorText(editor)) return "sent";
+      }
       await delay(400);
     }
     return "timeout";
+  }
+  function hasAnyRecentOwnPost(timeWindowMs) {
+    const profileHref = document.querySelector('[data-testid="AppTabBar_Profile_Link"]')?.getAttribute("href") || "";
+    const myHandle = profileHref.split("/").filter(Boolean)[0]?.toLowerCase();
+    if (!myHandle) return false;
+    return [...document.querySelectorAll('article[data-testid="tweet"]')].some((article) => {
+      const time = article.querySelector("time");
+      const href = time?.closest('a[href*="/status/"]')?.getAttribute("href") || "";
+      const author = href.split("/").filter(Boolean)[0]?.toLowerCase();
+      if (author !== myHandle) return false;
+      const timestamp = Date.parse(time?.dateTime || "");
+      return Number.isFinite(timestamp) && Date.now() - timestamp <= timeWindowMs;
+    });
   }
   function hasRecentMatchingReply(expectedText) {
     const expected = String(expectedText || "").trim(); if (!expected) return false;
