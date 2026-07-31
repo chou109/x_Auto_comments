@@ -66,6 +66,7 @@
     activeHoursEnabled: false,
     activeHourStart: "08:00",
     activeHourEnd: "23:00",
+    safeguardsEnabled: false,
     replyHourlyLimit: 30,
     replyDailyLimit: 200,
     postHourlyLimit: 12,
@@ -153,183 +154,203 @@
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
           <nav><button class="active" data-tab="filter">筛选</button><button data-tab="queue">结果 <b id="xrc-count">0</b></button><button data-tab="settings">评论设置</button><button data-tab="posting">自动发帖</button></nav>
         </div>
-        <div class="xrc-view active" data-view="filter">
-          <section class="xrc-filter-section">
-            <div class="xrc-section-heading"><div><b>筛选条件</b><small>作者与关键词按采集方式分别使用</small></div></div>
-            <label>作者账号 <span>填写 @ 后面的账号 ID</span><input id="xrc-authors" placeholder="例如：Davincij15"></label>
-            <label>关键词 <span>逗号分隔，命中任意一个</span><textarea id="xrc-keywords" rows="2" placeholder="例如：Bitcoin, BTC"></textarea></label>
-            <div class="xrc-grid"><label>最低点赞<input id="xrc-likes" type="number" min="0"></label><label>最近天数<input id="xrc-days" type="number" min="1"></label></div>
-            <label>结果处理顺序<select id="xrc-sort"><option value="views">浏览量：高 → 低</option><option value="viewsAsc">浏览量：低 → 高</option><option value="newest">日期：新 → 旧</option><option value="oldest">日期：旧 → 新</option><option value="likes">点赞数：高 → 低</option></select></label>
-            <div class="xrc-check-grid">
-              <label class="xrc-check" title="不采集回复其他账号或对话的帖子"><input id="xrc-replies" type="checkbox"> 排除回复帖</label>
-              <label class="xrc-check" title="不采集带有嵌入原帖的引用帖子"><input id="xrc-quotes" type="checkbox"> 排除引用帖</label>
-              <label class="xrc-check"><input id="xrc-repeat" type="checkbox"> 允许重复回复</label>
-              <label class="xrc-check"><input id="xrc-strict-keyword" type="checkbox"> 正文必须含关键词</label>
+        <div class=”xrc-view active” data-view=”filter”>
+          <details class=”xrc-settings-block” open>
+            <summary><b>筛选条件</b><small>作者与关键词按采集方式分别使用</small></summary>
+            <div class=”xrc-details-body”>
+            <label>作者账号 <span>填写 @ 后面的账号 ID</span><input id=”xrc-authors” placeholder=”例如：Davincij15”></label>
+            <label>关键词 <span>逗号分隔，命中任意一个</span><textarea id=”xrc-keywords” rows=”2” placeholder=”例如：Bitcoin, BTC”></textarea></label>
+            <div class=”xrc-grid”><label>最低点赞<input id=”xrc-likes” type=”number” min=”0”></label><label>最近天数<input id=”xrc-days” type=”number” min=”1”></label></div>
+            <label>结果处理顺序<select id=”xrc-sort”><option value=”views”>浏览量：高 → 低</option><option value=”viewsAsc”>浏览量：低 → 高</option><option value=”newest”>日期：新 → 旧</option><option value=”oldest”>日期：旧 → 新</option><option value=”likes”>点赞数：高 → 低</option></select></label>
+            <div class=”xrc-check-grid”>
+              <label class=”xrc-check” title=”不采集回复其他账号或对话的帖子”><input id=”xrc-replies” type=”checkbox”> 排除回复帖</label>
+              <label class=”xrc-check” title=”不采集带有嵌入原帖的引用帖子”><input id=”xrc-quotes” type=”checkbox”> 排除引用帖</label>
+              <label class=”xrc-check”><input id=”xrc-repeat” type=”checkbox”> 允许重复回复</label>
+              <label class=”xrc-check”><input id=”xrc-strict-keyword” type=”checkbox”> 正文必须含关键词</label>
             </div>
-          </section>
-          <section class="xrc-action-card">
-            <div class="xrc-section-heading"><div><b>当前页面</b><small>快速处理已经打开并加载的帖子</small></div></div>
-            <div class="xrc-action-grid">
-              <button class="xrc-primary" data-act="scan">扫描当前页面</button>
-              <button class="xrc-secondary" data-act="search">打开组合搜索</button>
-            </div>
-          </section>
-          <section class="xrc-action-card">
-            <div class="xrc-section-heading"><div><b>自动滚动采集</b><small>按有效结果计数，翻到底后自动结束</small></div></div>
-            <label>最多采集条数<input id="xrc-collect-limit" type="number" min="20" max="2000"></label>
-            <div class="xrc-action-grid">
-              <button id="xrc-collect-button" class="xrc-secondary" data-act="collect-account">采集作者账号</button>
-              <button id="xrc-collect-search-button" class="xrc-secondary" data-act="collect-search">采集关键词结果</button>
-            </div>
-          </section>
-          <details class="xrc-loop-settings">
-            <summary><span><b>循环采集并评论</b><small>多轮自动执行，达到总上限后结束</small></span></summary>
-            <div class="xrc-details-body">
-              <label>采集模式<select id="xrc-loop-mode"><option value="search">关键词搜索</option><option value="account">指定账号</option></select></label>
-              <div class="xrc-grid"><label>总发送上限 <span>最高 10000</span><input id="xrc-loop-total" type="number" min="1" max="10000"></label><label>每轮采集上限<input id="xrc-loop-round" type="number" min="1" max="2000"></label></div>
-              <div class="xrc-grid"><label>轮次间隔（分钟）<input id="xrc-loop-interval" type="number" min="1" max="1440"></label><label>连续空轮上限<input id="xrc-loop-empty" type="number" min="1" max="20"></label></div>
-              <div class="xrc-action-grid"><button id="xrc-loop-start" class="xrc-primary" data-act="start-loop">开始循环</button><button class="xrc-secondary" data-act="pause-loop">暂停 / 继续</button></div>
-              <button class="xrc-danger-outline" data-act="stop-loop">终止循环</button>
-              <p id="xrc-loop-status" class="xrc-hint">达到总上限后自动结束；再次运行需重新点击开始。</p>
             </div>
           </details>
-          <details class="xrc-advanced-block">
-            <summary><span><b>指定帖子链接</b><small>直接载入一个或多个帖子</small></span></summary>
-            <div class="xrc-details-body">
-              <label>帖子链接 <span>每行一条</span><textarea id="xrc-target-urls" rows="4" placeholder="https://x.com/账号/status/帖子ID"></textarea></label>
-              <label>每个帖子评论次数 <span>同一帖子连续发送多条不同评论</span><input id="xrc-direct-repeat-count" type="number" min="1" max="100"></label>
-              <button class="xrc-secondary" data-act="load-targets">载入指定帖子</button>
+          <details class=”xrc-settings-block” open>
+            <summary><b>采集与循环</b><small>扫描、采集、循环评论</small></summary>
+            <div class=”xrc-details-body”>
+            <div class=”xrc-section-heading”><div><b>快速操作</b></div></div>
+            <div class=”xrc-action-grid”>
+              <button class=”xrc-primary” data-act=”scan”>扫描当前页面</button>
+              <button class=”xrc-secondary” data-act=”search”>打开组合搜索</button>
+            </div>
+            <div class=”xrc-section-heading” style=”margin-top:12px”><div><b>自动采集</b><small>按有效结果计数，翻到底后结束</small></div></div>
+            <label>最多采集条数<input id=”xrc-collect-limit” type=”number” min=”20” max=”2000”></label>
+            <div class=”xrc-action-grid”>
+              <button id=”xrc-collect-button” class=”xrc-secondary” data-act=”collect-account”>采集作者账号</button>
+              <button id=”xrc-collect-search-button” class=”xrc-secondary” data-act=”collect-search”>采集关键词结果</button>
+            </div>
+            <div class=”xrc-section-heading” style=”margin-top:12px”><div><b>循环采集并评论</b><small>多轮自动执行</small></div></div>
+            <label>采集模式<select id=”xrc-loop-mode”><option value=”search”>关键词搜索</option><option value=”account”>指定账号</option></select></label>
+            <div class=”xrc-grid”><label>总发送上限 <span>最高 10000</span><input id=”xrc-loop-total” type=”number” min=”1” max=”10000”></label><label>每轮采集上限<input id=”xrc-loop-round” type=”number” min=”1” max=”2000”></label></div>
+            <div class=”xrc-grid”><label>轮次间隔（分钟）<input id=”xrc-loop-interval” type=”number” min=”1” max=”1440”></label><label>连续空轮上限<input id=”xrc-loop-empty” type=”number” min=”1” max=”20”></label></div>
+            <div class=”xrc-action-grid”><button id=”xrc-loop-start” class=”xrc-primary” data-act=”start-loop”>开始循环</button><button class=”xrc-secondary” data-act=”pause-loop”>暂停 / 继续</button></div>
+            <button class=”xrc-danger-outline” data-act=”stop-loop”>终止循环</button>
+            <p id=”xrc-loop-status” class=”xrc-hint”>达到总上限后自动结束；再次运行需重新点击开始。</p>
+            </div>
+          </details>
+          <details class=”xrc-settings-block”>
+            <summary><b>指定帖子链接</b><small>直接载入一个或多个帖子</small></summary>
+            <div class=”xrc-details-body”>
+            <label>帖子链接 <span>每行一条</span><textarea id=”xrc-target-urls” rows=”4” placeholder=”https://x.com/账号/status/帖子ID”></textarea></label>
+            <label>每个帖子评论次数 <span>同一帖子连续发送多条不同评论</span><input id=”xrc-direct-repeat-count” type=”number” min=”1” max=”100”></label>
+            <button class=”xrc-secondary” data-act=”load-targets”>载入指定帖子</button>
             </div>
           </details>
         </div>
-        <div class="xrc-view" data-view="queue"><div id="xrc-list" class="xrc-list"></div></div>
-        <div class="xrc-view" data-view="settings">
-          <div class="xrc-profile-box">
-            <label>评论配置方案<select id="xrc-reply-profile"></select></label>
-            <label>方案名称<input id="xrc-reply-profile-name" placeholder="例如：BTC英文推广"></label>
-            <div class="xrc-grid"><button class="xrc-secondary" data-act="save-reply-profile">保存/覆盖方案</button><button class="xrc-secondary" data-act="load-reply-profile">加载方案</button></div>
-            <button class="xrc-secondary" data-act="delete-reply-profile">删除所选方案</button>
-          </div>
-          <label>API Key<input id="xrc-key" type="password" placeholder="sk-..."></label>
-          <label>API 地址<input id="xrc-base" placeholder="https://api.openai.com/v1"></label>
-          <label>模型<input id="xrc-model" placeholder="gpt-4.1-mini"></label>
-          <label>回复内容来源<select id="xrc-source"><option value="ai">AI 生成</option><option value="specified">指定固定内容</option></select></label>
-          <div id="xrc-specified-settings">
-            <details id="xrc-specified-details" open>
-              <summary><b>指定回复内容</b><span id="xrc-specified-count">0 条</span></summary>
-              <div class="xrc-specified-body">
-                <div class="xrc-content-actions">
-                  <button class="xrc-add-reply" data-act="add-specified">＋ 在顶部添加新内容</button>
-                  <button class="xrc-add-reply" data-act="toggle-reply-bulk-import">批量导入</button>
-                </div>
-                <div id="xrc-reply-bulk-import" class="xrc-bulk-import xrc-hidden">
-                  <label>粘贴编号内容
-                    <span>支持 1.、2.、3. 格式</span>
-                    <textarea id="xrc-reply-bulk-text" rows="10" placeholder="1. 第一条回复正文&#10;合约地址&#10;&#10;2. 第二条回复正文&#10;合约地址"></textarea>
-                  </label>
-                  <p class="xrc-hint">每个编号到下一个编号之间视为一条回复；导入将追加到现有内容并自动忽略重复项。</p>
-                  <div class="xrc-bulk-buttons">
-                    <button data-act="cancel-reply-bulk-import">取消</button>
-                    <button class="confirm" data-act="import-reply-contents">追加导入</button>
-                  </div>
-                </div>
-                <div id="xrc-specified-list"></div>
-              </div>
-            </details>
-            <label>使用方式<select id="xrc-specified-order"><option value="sequential">按顺序轮换</option><option value="random">每次随机选择</option></select></label>
-          </div>
-          <div id="xrc-ai-settings">
-            <label>回复模式<select id="xrc-mode"><option value="directed">定向回复（由我的提示词主导）</option><option value="contextual">原帖回复（围绕帖子内容）</option></select></label>
-            <label>生成建议数量<input id="xrc-suggestions" type="number" min="1" max="10"></label>
-            <label>定向回复提示词 <span>定向模式必填</span><textarea id="xrc-prompt" rows="6" placeholder="例如：重点表达比特币长期主义；自然提到项目名；不要谈价格；语气坚定；英文 20 词以内。"></textarea></label>
-          </div>
-          <label>单条回复字符上限 <span>X 普通回复最多 280</span><input id="xrc-maxchars" type="number" min="20" max="280"></label>
-          <label>自动回复数量<input id="xrc-autocount" type="number" min="1" max="2000"></label>
-          <label>自动发送间隔模式<select id="xrc-delaymode"><option value="fixed">固定时间</option><option value="random">随机时间区间</option></select></label>
-          <div id="xrc-fixed-delay"><label>固定间隔（秒） <span>最低 1 秒</span><input id="xrc-delay" type="number" min="1" max="600"></label></div>
-          <div id="xrc-random-delay" class="xrc-grid"><label>随机最小秒数<input id="xrc-delay-min" type="number" min="1" max="600"></label><label>随机最大秒数<input id="xrc-delay-max" type="number" min="1" max="600"></label></div>
-          <div class="xrc-media-settings">
-            <label>随机评论图片 <span>可一次选择多张，保存在扩展本地</span><input id="xrc-image-files" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple></label>
-            <label>使用图片概率（%） <span>设为 0 则始终不带图</span><input id="xrc-image-chance" type="number" min="0" max="100"></label>
-            <div class="xrc-grid"><label>每次发送图片数量 <span>X 最多支持 4 张</span><input id="xrc-image-count" type="number" min="1" max="4"></label><label>图片选择方式<select id="xrc-image-selection"><option value="random">随机选取</option><option value="sequential">顺序轮换</option><option value="all">全部发送</option></select></label></div>
-            <div id="xrc-image-list" class="xrc-image-list"></div>
-          </div>
-          <details class="xrc-loop-settings">
-            <summary><b>账号运行保护</b></summary>
-            <label class="xrc-check"><input id="xrc-active-hours-enabled" type="checkbox"> 仅在指定时段运行</label>
-            <div class="xrc-grid"><label>开始时间<input id="xrc-active-start" type="time"></label><label>结束时间<input id="xrc-active-end" type="time"></label></div>
-            <div class="xrc-grid"><label>评论每小时上限<input id="xrc-reply-hour-limit" type="number" min="1" max="1000"></label><label>评论每日上限<input id="xrc-reply-day-limit" type="number" min="1" max="10000"></label></div>
-            <label>连续失败熔断次数<input id="xrc-failure-limit" type="number" min="1" max="50"></label>
-            <p class="xrc-hint">每个浏览器环境独立计数。达到上限会等待下一个小时或次日，不会丢失任务。</p>
+        <div class=”xrc-view” data-view=”queue”><div id=”xrc-list” class=”xrc-list”></div></div>
+        <div class=”xrc-view” data-view=”settings”>
+          <details class=”xrc-settings-block” open>
+            <summary><b>方案与 API</b></summary>
+            <div class=”xrc-details-body”>
+            <div class=”xrc-profile-box” style=”margin-top:0;border:0;padding:0;background:transparent”>
+              <label>评论配置方案<select id=”xrc-reply-profile”></select></label>
+              <label>方案名称<input id=”xrc-reply-profile-name” placeholder=”例如：BTC英文推广”></label>
+              <div class=”xrc-grid”><button class=”xrc-secondary” data-act=”save-reply-profile”>保存/覆盖方案</button><button class=”xrc-secondary” data-act=”load-reply-profile”>加载方案</button></div>
+              <button class=”xrc-secondary” data-act=”delete-reply-profile”>删除所选方案</button>
+            </div>
+            <label style=”margin-top:8px”>API Key<input id=”xrc-key” type=”password” placeholder=”sk-...”></label>
+            <label>API 地址<input id=”xrc-base” placeholder=”https://api.openai.com/v1”></label>
+            <label>模型<input id=”xrc-model” placeholder=”gpt-4.1-mini”></label>
+            </div>
           </details>
-          <button class="xrc-primary" data-act="save">保存设置</button>
-          <p class="xrc-hint">定向模式下，你的提示词决定回复方向，原帖只用于自然衔接。密钥和提示词保存在浏览器扩展本地存储中。</p>
+          <details class=”xrc-settings-block” open>
+            <summary><b>回复内容</b><small>AI 生成或指定固定内容</small></summary>
+            <div class=”xrc-details-body”>
+            <label>回复内容来源<select id=”xrc-source”><option value=”ai”>AI 生成</option><option value=”specified”>指定固定内容</option></select></label>
+            <div id=”xrc-specified-settings”>
+              <details id=”xrc-specified-details” open>
+                <summary><b>指定回复内容</b><span id=”xrc-specified-count”>0 条</span></summary>
+                <div class=”xrc-specified-body”>
+                  <div class=”xrc-content-actions”>
+                    <button class=”xrc-add-reply” data-act=”add-specified”>＋ 在顶部添加新内容</button>
+                    <button class=”xrc-add-reply” data-act=”toggle-reply-bulk-import”>批量导入</button>
+                  </div>
+                  <div id=”xrc-reply-bulk-import” class=”xrc-bulk-import xrc-hidden”>
+                    <label>粘贴编号内容<span>支持 1.、2.、3. 格式</span><textarea id=”xrc-reply-bulk-text” rows=”10” placeholder=”1. 第一条回复正文&#10;合约地址&#10;&#10;2. 第二条回复正文&#10;合约地址”></textarea></label>
+                    <p class=”xrc-hint”>每个编号到下一个编号之间视为一条回复；导入将追加到现有内容并自动忽略重复项。</p>
+                    <div class=”xrc-bulk-buttons”><button data-act=”cancel-reply-bulk-import”>取消</button><button class=”confirm” data-act=”import-reply-contents”>追加导入</button></div>
+                  </div>
+                  <div id=”xrc-specified-list”></div>
+                </div>
+              </details>
+              <label>使用方式<select id=”xrc-specified-order”><option value=”sequential”>按顺序轮换</option><option value=”random”>每次随机选择</option></select></label>
+            </div>
+            <div id=”xrc-ai-settings”>
+              <label>回复模式<select id=”xrc-mode”><option value=”directed”>定向回复（由我的提示词主导）</option><option value=”contextual”>原帖回复（围绕帖子内容）</option></select></label>
+              <label>生成建议数量<input id=”xrc-suggestions” type=”number” min=”1” max=”10”></label>
+              <label>定向回复提示词 <span>定向模式必填</span><textarea id=”xrc-prompt” rows=”6” placeholder=”例如：重点表达比特币长期主义；自然提到项目名；不要谈价格；语气坚定；英文 20 词以内。”></textarea></label>
+            </div>
+            </div>
+          </details>
+          <details class=”xrc-settings-block” open>
+            <summary><b>发送设置</b><small>数量、间隔、图片</small></summary>
+            <div class=”xrc-details-body”>
+            <label>单条回复字符上限 <span>X 普通回复最多 280</span><input id=”xrc-maxchars” type=”number” min=”20” max=”280”></label>
+            <label>自动回复数量<input id=”xrc-autocount” type=”number” min=”1” max=”2000”></label>
+            <label>自动发送间隔模式<select id=”xrc-delaymode”><option value=”fixed”>固定时间</option><option value=”random”>随机时间区间</option></select></label>
+            <div id=”xrc-fixed-delay”><label>固定间隔（秒） <span>最低 1 秒</span><input id=”xrc-delay” type=”number” min=”1” max=”600”></label></div>
+            <div id=”xrc-random-delay” class=”xrc-grid”><label>随机最小秒数<input id=”xrc-delay-min” type=”number” min=”1” max=”600”></label><label>随机最大秒数<input id=”xrc-delay-max” type=”number” min=”1” max=”600”></label></div>
+            <div class=”xrc-media-settings” style=”margin:14px 0 0;padding:10px;border:1px solid #2f3336;border-radius:10px”>
+              <label>随机评论图片 <span>可一次选择多张，保存在扩展本地</span><input id=”xrc-image-files” type=”file” accept=”image/jpeg,image/png,image/webp,image/gif” multiple></label>
+              <label>使用图片概率（%） <span>设为 0 则始终不带图</span><input id=”xrc-image-chance” type=”number” min=”0” max=”100”></label>
+              <div class=”xrc-grid”><label>每次发送图片数量 <span>X 最多支持 4 张</span><input id=”xrc-image-count” type=”number” min=”1” max=”4”></label><label>图片选择方式<select id=”xrc-image-selection”><option value=”random”>随机选取</option><option value=”sequential”>顺序轮换</option><option value=”all”>全部发送</option></select></label></div>
+              <div id=”xrc-image-list” class=”xrc-image-list”></div>
+            </div>
+            </div>
+          </details>
+          <details class=”xrc-settings-block”>
+            <summary><b>运行保护</b><small>默认关闭；开启后限制发送频率与时段</small></summary>
+            <div class=”xrc-details-body”>
+            <label class=”xrc-check”><input id=”xrc-safeguards-enabled” type=”checkbox”> 启用运行保护</label>
+            <div id=”xrc-safeguards-body”>
+            <label class=”xrc-check”><input id=”xrc-active-hours-enabled” type=”checkbox”> 仅在指定时段运行</label>
+            <div class=”xrc-grid”><label>开始时间<input id=”xrc-active-start” type=”time”></label><label>结束时间<input id=”xrc-active-end” type=”time”></label></div>
+            <div class=”xrc-grid”><label>评论每小时上限<input id=”xrc-reply-hour-limit” type=”number” min=”1” max=”1000”></label><label>评论每日上限<input id=”xrc-reply-day-limit” type=”number” min=”1” max=”10000”></label></div>
+            <div class=”xrc-grid”><label>发帖每小时上限<input id=”xrc-post-hour-limit” type=”number” min=”1” max=”1000”></label><label>发帖每日上限<input id=”xrc-post-day-limit” type=”number” min=”1” max=”10000”></label></div>
+            <label>连续失败熔断次数<input id=”xrc-failure-limit” type=”number” min=”1” max=”50”></label>
+            <p class=”xrc-hint”>每个浏览器环境独立计数。评论与发帖的活跃时段和熔断共享上面设置。</p>
+            </div>
+            </div>
+          </details>
+          <button class=”xrc-primary” data-act=”save”>保存设置</button>
+          <p class=”xrc-hint”>定向模式下，你的提示词决定回复方向，原帖只用于自然衔接。密钥和提示词保存在浏览器扩展本地存储中。</p>
         </div>
-        <div class="xrc-view" data-view="posting">
-          <div id="xrc-post-jobbar" class="xrc-post-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-post-pause" class="pause" data-act="pause-post">暂停</button><button type="button" data-act="cancel-post">结束发帖</button></div></div>
-          <div class="xrc-module-title"><strong>自动发帖</strong><small>独立于自动评论，内容、图片和进度互不混用</small></div>
-          <div class="xrc-profile-box">
-            <label>发帖配置方案<select id="xrc-post-profile"></select></label>
-            <label>方案名称<input id="xrc-post-profile-name" placeholder="例如：社区日常发帖"></label>
-            <div class="xrc-grid"><button class="xrc-secondary" data-act="save-post-profile">保存/覆盖方案</button><button class="xrc-secondary" data-act="load-post-profile">加载方案</button></div>
-            <button class="xrc-secondary" data-act="delete-post-profile">删除所选方案</button>
-          </div>
-          <label>发布位置<select id="xrc-post-destination"><option value="timeline">公开时间线</option><option value="community">指定 X 社区</option></select></label>
-          <div id="xrc-post-community-wrap"><label>社区链接或 ID <span>例如 https://x.com/i/communities/123…</span><input id="xrc-post-community" placeholder="社区链接或数字 ID"></label></div>
-          <label>发帖内容来源<select id="xrc-post-source"><option value="specified">指定固定内容</option><option value="ai">AI 生成</option></select></label>
-          <div id="xrc-post-specified-settings">
-            <details id="xrc-post-specified-details">
-              <summary><b>指定发帖内容</b><span id="xrc-post-specified-count">0 条</span></summary>
-              <div class="xrc-specified-body">
-                <div class="xrc-content-actions">
-                  <button class="xrc-add-reply" data-act="add-post-content">＋ 在顶部添加新内容</button>
-                  <button class="xrc-add-reply" data-act="toggle-post-bulk-import">批量导入</button>
-                </div>
-                <div id="xrc-post-bulk-import" class="xrc-bulk-import xrc-hidden">
-                  <label>粘贴编号内容
-                    <span>支持 1.、2.、3. 格式</span>
-                    <textarea id="xrc-post-bulk-text" rows="10" placeholder="1. 第一条帖子正文&#10;合约地址&#10;&#10;2. 第二条帖子正文&#10;合约地址"></textarea>
-                  </label>
-                  <p class="xrc-hint">每个编号到下一个编号之间视为一条帖子；导入将追加到现有内容并自动忽略重复项。</p>
-                  <div class="xrc-bulk-buttons">
-                    <button data-act="cancel-post-bulk-import">取消</button>
-                    <button class="confirm" data-act="import-post-contents">追加导入</button>
+        <div class=”xrc-view” data-view=”posting”>
+          <div id=”xrc-post-jobbar” class=”xrc-post-jobbar”><div class=”xrc-jobbar-status”><span class=”xrc-jobbar-primary”></span><small class=”xrc-jobbar-meta”></small></div><div><button type=”button” id=”xrc-post-pause” class=”pause” data-act=”pause-post”>暂停</button><button type=”button” data-act=”cancel-post”>结束发帖</button></div></div>
+          <div class=”xrc-module-title”><strong>自动发帖</strong><small>独立于自动评论，内容、图片和进度互不混用</small></div>
+          <details class=”xrc-settings-block” open>
+            <summary><b>方案与目标</b></summary>
+            <div class=”xrc-details-body”>
+            <div class=”xrc-profile-box” style=”margin-top:0;border:0;padding:0;background:transparent”>
+              <label>发帖配置方案<select id=”xrc-post-profile”></select></label>
+              <label>方案名称<input id=”xrc-post-profile-name” placeholder=”例如：社区日常发帖”></label>
+              <div class=”xrc-grid”><button class=”xrc-secondary” data-act=”save-post-profile”>保存/覆盖方案</button><button class=”xrc-secondary” data-act=”load-post-profile”>加载方案</button></div>
+              <button class=”xrc-secondary” data-act=”delete-post-profile”>删除所选方案</button>
+            </div>
+            <label style=”margin-top:8px”>发布位置<select id=”xrc-post-destination”><option value=”timeline”>公开时间线</option><option value=”community”>指定 X 社区</option></select></label>
+            <div id=”xrc-post-community-wrap”><label>社区链接或 ID <span>例如 https://x.com/i/communities/123…</span><input id=”xrc-post-community” placeholder=”社区链接或数字 ID”></label></div>
+            <label>发帖内容来源<select id=”xrc-post-source”><option value=”specified”>指定固定内容</option><option value=”ai”>AI 生成</option></select></label>
+            </div>
+          </details>
+          <details class=”xrc-settings-block” open>
+            <summary><b>发帖内容</b></summary>
+            <div class=”xrc-details-body”>
+            <div id=”xrc-post-specified-settings”>
+              <details id=”xrc-post-specified-details”>
+                <summary><b>指定发帖内容</b><span id=”xrc-post-specified-count”>0 条</span></summary>
+                <div class=”xrc-specified-body”>
+                  <div class=”xrc-content-actions”>
+                    <button class=”xrc-add-reply” data-act=”add-post-content”>＋ 在顶部添加新内容</button>
+                    <button class=”xrc-add-reply” data-act=”toggle-post-bulk-import”>批量导入</button>
                   </div>
+                  <div id=”xrc-post-bulk-import” class=”xrc-bulk-import xrc-hidden”>
+                    <label>粘贴编号内容<span>支持 1.、2.、3. 格式</span><textarea id=”xrc-post-bulk-text” rows=”10” placeholder=”1. 第一条帖子正文&#10;合约地址&#10;&#10;2. 第二条帖子正文&#10;合约地址”></textarea></label>
+                    <p class=”xrc-hint”>每个编号到下一个编号之间视为一条帖子；导入将追加到现有内容并自动忽略重复项。</p>
+                    <div class=”xrc-bulk-buttons”><button data-act=”cancel-post-bulk-import”>取消</button><button class=”confirm” data-act=”import-post-contents”>追加导入</button></div>
+                  </div>
+                  <div id=”xrc-post-specified-list”></div>
                 </div>
-                <div id="xrc-post-specified-list"></div>
-              </div>
-            </details>
-            <label>使用方式<select id="xrc-post-specified-order"><option value="sequential">按顺序轮换</option><option value="random">每次随机选择</option></select></label>
-          </div>
-          <div id="xrc-post-ai-settings">
-            <label>AI 发帖提示词 <span>描述主题、语气和必须包含的内容</span><textarea id="xrc-post-prompt" rows="6" placeholder="例如：生成英文 Bitcoin 社区帖子，语气自然，不作收益承诺，每条角度不同。"></textarea></label>
-          </div>
-          <label>单条帖子字符上限 <span>X 普通帖子最多 280</span><input id="xrc-post-maxchars" type="number" min="20" max="280"></label>
-          <label>自动发帖数量<input id="xrc-post-count" type="number" min="1" max="2000"></label>
-          <details class="xrc-loop-settings">
-            <summary><b>循环发帖（有总上限）</b></summary>
-            <label class="xrc-check"><input id="xrc-post-loop-enabled" type="checkbox"> 启用有限循环发帖</label>
-            <div class="xrc-grid"><label>总发送上限 <span>最高 10000</span><input id="xrc-post-loop-total" type="number" min="1" max="10000"></label><label>批次间隔（分钟）<input id="xrc-post-loop-interval" type="number" min="1" max="1440"></label></div>
-            <label>连续空批次上限 <span>整批没有成功发布时计数</span><input id="xrc-post-loop-empty" type="number" min="1" max="20"></label>
-            <p class="xrc-hint">“自动发帖数量”作为每批数量；达到总上限后结束，必须手动重新启动。</p>
+              </details>
+              <label>使用方式<select id=”xrc-post-specified-order”><option value=”sequential”>按顺序轮换</option><option value=”random”>每次随机选择</option></select></label>
+            </div>
+            <div id=”xrc-post-ai-settings”>
+              <label>AI 发帖提示词 <span>描述主题、语气和必须包含的内容</span><textarea id=”xrc-post-prompt” rows=”6” placeholder=”例如：生成英文 Bitcoin 社区帖子，语气自然，不作收益承诺，每条角度不同。”></textarea></label>
+            </div>
+            </div>
           </details>
-          <label>发帖间隔模式<select id="xrc-post-delaymode"><option value="fixed">固定时间</option><option value="random">随机时间区间</option></select></label>
-          <div id="xrc-post-fixed-delay"><label>固定间隔（秒）<input id="xrc-post-delay" type="number" min="1" max="86400"></label></div>
-          <div id="xrc-post-random-delay" class="xrc-grid"><label>随机最小秒数<input id="xrc-post-delay-min" type="number" min="1" max="86400"></label><label>随机最大秒数<input id="xrc-post-delay-max" type="number" min="1" max="86400"></label></div>
-          <div class="xrc-media-settings">
-            <label>随机发帖图片 <span>发帖专用图片库，不与评论图片混用</span><input id="xrc-post-image-files" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple></label>
-            <label>使用图片概率（%） <span>随机结果也可以不选图片</span><input id="xrc-post-image-chance" type="number" min="0" max="100"></label>
-            <div class="xrc-grid"><label>每次发送图片数量 <span>X 最多支持 4 张</span><input id="xrc-post-image-count" type="number" min="1" max="4"></label><label>图片选择方式<select id="xrc-post-image-selection"><option value="random">随机选取</option><option value="sequential">顺序轮换</option><option value="all">全部发送</option></select></label></div>
-            <div id="xrc-post-image-list" class="xrc-image-list"></div>
-          </div>
-          <details class="xrc-loop-settings">
-            <summary><b>发帖运行保护</b></summary>
-            <div class="xrc-grid"><label>发帖每小时上限<input id="xrc-post-hour-limit" type="number" min="1" max="1000"></label><label>发帖每日上限<input id="xrc-post-day-limit" type="number" min="1" max="10000"></label></div>
-            <p class="xrc-hint">活跃时段与连续失败熔断沿用“评论设置”中的账号运行保护。</p>
+          <details class=”xrc-settings-block” open>
+            <summary><b>发送设置</b><small>数量、间隔、图片</small></summary>
+            <div class=”xrc-details-body”>
+            <label>单条帖子字符上限 <span>X 普通帖子最多 280</span><input id=”xrc-post-maxchars” type=”number” min=”20” max=”280”></label>
+            <label>自动发帖数量<input id=”xrc-post-count” type=”number” min=”1” max=”2000”></label>
+            <label>发帖间隔模式<select id=”xrc-post-delaymode”><option value=”fixed”>固定时间</option><option value=”random”>随机时间区间</option></select></label>
+            <div id=”xrc-post-fixed-delay”><label>固定间隔（秒）<input id=”xrc-post-delay” type=”number” min=”1” max=”86400”></label></div>
+            <div id=”xrc-post-random-delay” class=”xrc-grid”><label>随机最小秒数<input id=”xrc-post-delay-min” type=”number” min=”1” max=”86400”></label><label>随机最大秒数<input id=”xrc-post-delay-max” type=”number” min=”1” max=”86400”></label></div>
+            <div class=”xrc-media-settings” style=”margin:14px 0 0;padding:10px;border:1px solid #2f3336;border-radius:10px”>
+              <label>随机发帖图片 <span>发帖专用图片库，不与评论图片混用</span><input id=”xrc-post-image-files” type=”file” accept=”image/jpeg,image/png,image/webp,image/gif” multiple></label>
+              <label>使用图片概率（%） <span>随机结果也可以不选图片</span><input id=”xrc-post-image-chance” type=”number” min=”0” max=”100”></label>
+              <div class=”xrc-grid”><label>每次发送图片数量 <span>X 最多支持 4 张</span><input id=”xrc-post-image-count” type=”number” min=”1” max=”4”></label><label>图片选择方式<select id=”xrc-post-image-selection”><option value=”random”>随机选取</option><option value=”sequential”>顺序轮换</option><option value=”all”>全部发送</option></select></label></div>
+              <div id=”xrc-post-image-list” class=”xrc-image-list”></div>
+            </div>
+            </div>
           </details>
-          <button class="xrc-primary" data-act="save-post">保存发帖设置</button>
-          <button class="xrc-post-start" data-act="start-post">开始自动发帖</button>
-          <p class="xrc-hint">社区发帖会先进入目标社区并校验社区路径；无法确认发布位置时会暂停，避免误发到公开时间线。</p>
+          <details class=”xrc-settings-block”>
+            <summary><b>循环发帖</b><small>有总上限的批次循环</small></summary>
+            <div class=”xrc-details-body”>
+            <label class=”xrc-check”><input id=”xrc-post-loop-enabled” type=”checkbox”> 启用有限循环发帖</label>
+            <div class=”xrc-grid”><label>总发送上限 <span>最高 10000</span><input id=”xrc-post-loop-total” type=”number” min=”1” max=”10000”></label><label>批次间隔（分钟）<input id=”xrc-post-loop-interval” type=”number” min=”1” max=”1440”></label></div>
+            <label>连续空批次上限 <span>整批没有成功发布时计数</span><input id=”xrc-post-loop-empty” type=”number” min=”1” max=”20”></label>
+            <p class=”xrc-hint”>”自动发帖数量”作为每批数量；达到总上限后结束，必须手动重新启动。</p>
+            </div>
+          </details>
+          <button class=”xrc-primary” data-act=”save-post”>保存发帖设置</button>
+          <button class=”xrc-post-start” data-act=”start-post”>开始自动发帖</button>
+          <p class=”xrc-hint”>社区发帖会先进入目标社区并校验社区路径；无法确认发布位置时会暂停，避免误发到公开时间线。</p>
         </div>
         <div id="xrc-detail" class="xrc-detail"></div>
       </main>
@@ -380,6 +401,7 @@
       }
       if (event.target.id === "xrc-delaymode") updateDelayModeUi();
       if (event.target.id === "xrc-source") updateReplySourceUi();
+      if (event.target.id === "xrc-safeguards-enabled") updateSafeguardsUi();
       if (event.target.id === "xrc-image-files") return addImages(event.target.files);
       if (event.target.id === "xrc-post-delaymode") updatePostDelayModeUi();
       if (event.target.id === "xrc-post-source") updatePostSourceUi();
@@ -460,6 +482,7 @@
     byId("xrc-reply-hour-limit").value = state.settings.replyHourlyLimit;
     byId("xrc-reply-day-limit").value = state.settings.replyDailyLimit;
     byId("xrc-failure-limit").value = state.settings.consecutiveFailureLimit;
+    byId("xrc-safeguards-enabled").checked = state.settings.safeguardsEnabled;
     renderImageLibrary();
     byId("xrc-post-source").value = state.settings.postSource;
     renderPostContentRows(parseSpecifiedReplies(state.settings.postSpecifiedContents, false));
@@ -488,6 +511,7 @@
     updatePostDelayModeUi();
     updatePostSourceUi();
     updatePostDestinationUi();
+    updateSafeguardsUi();
   }
 
   async function onClick(event) {
@@ -570,7 +594,7 @@
     let randomDelayMin = clamp(byId("xrc-delay-min").value, 1, 600, 10);
     let randomDelayMax = clamp(byId("xrc-delay-max").value, 1, 600, 30);
     if (randomDelayMin > randomDelayMax) [randomDelayMin, randomDelayMax] = [randomDelayMax, randomDelayMin];
-    const values = { ...currentFilters(), apiKey: byId("xrc-key").value.trim(), apiBase: byId("xrc-base").value.trim() || DEFAULTS.apiBase, model: byId("xrc-model").value.trim() || DEFAULTS.model, replySource: byId("xrc-source").value, specifiedReplies: getSpecifiedRowValues(), specifiedReplyOrder: byId("xrc-specified-order").value, replyMode: byId("xrc-mode").value, customPrompt: byId("xrc-prompt").value.trim(), maxChars: clamp(byId("xrc-maxchars").value, 20, 280, 280), suggestionCount: clamp(byId("xrc-suggestions").value, 1, 10, 5), autoReplyCount: clamp(byId("xrc-autocount").value, 1, 2000, 3), autoDelaySeconds: clamp(byId("xrc-delay").value, 1, 600, 10), delayMode: byId("xrc-delaymode").value, randomDelayMin, randomDelayMax, imageUseChance: clamp(byId("xrc-image-chance").value, 0, 100, 50), imageCount: clamp(byId("xrc-image-count").value, 1, 4, 1), imageSelectionMode: byId("xrc-image-selection").value || "random", activeHoursEnabled: byId("xrc-active-hours-enabled").checked, activeHourStart: byId("xrc-active-start").value || DEFAULTS.activeHourStart, activeHourEnd: byId("xrc-active-end").value || DEFAULTS.activeHourEnd, replyHourlyLimit: clamp(byId("xrc-reply-hour-limit").value, 1, 1000, DEFAULTS.replyHourlyLimit), replyDailyLimit: clamp(byId("xrc-reply-day-limit").value, 1, 10000, DEFAULTS.replyDailyLimit), consecutiveFailureLimit: clamp(byId("xrc-failure-limit").value, 1, 50, DEFAULTS.consecutiveFailureLimit) };
+    const values = { ...currentFilters(), apiKey: byId("xrc-key").value.trim(), apiBase: byId("xrc-base").value.trim() || DEFAULTS.apiBase, model: byId("xrc-model").value.trim() || DEFAULTS.model, replySource: byId("xrc-source").value, specifiedReplies: getSpecifiedRowValues(), specifiedReplyOrder: byId("xrc-specified-order").value, replyMode: byId("xrc-mode").value, customPrompt: byId("xrc-prompt").value.trim(), maxChars: clamp(byId("xrc-maxchars").value, 20, 280, 280), suggestionCount: clamp(byId("xrc-suggestions").value, 1, 10, 5), autoReplyCount: clamp(byId("xrc-autocount").value, 1, 2000, 3), autoDelaySeconds: clamp(byId("xrc-delay").value, 1, 600, 10), delayMode: byId("xrc-delaymode").value, randomDelayMin, randomDelayMax, imageUseChance: clamp(byId("xrc-image-chance").value, 0, 100, 50), imageCount: clamp(byId("xrc-image-count").value, 1, 4, 1), imageSelectionMode: byId("xrc-image-selection").value || "random", safeguardsEnabled: byId("xrc-safeguards-enabled").checked, activeHoursEnabled: byId("xrc-active-hours-enabled").checked, activeHourStart: byId("xrc-active-start").value || DEFAULTS.activeHourStart, activeHourEnd: byId("xrc-active-end").value || DEFAULTS.activeHourEnd, replyHourlyLimit: clamp(byId("xrc-reply-hour-limit").value, 1, 1000, DEFAULTS.replyHourlyLimit), replyDailyLimit: clamp(byId("xrc-reply-day-limit").value, 1, 10000, DEFAULTS.replyDailyLimit), postHourlyLimit: clamp(byId("xrc-post-hour-limit").value, 1, 1000, DEFAULTS.postHourlyLimit), postDailyLimit: clamp(byId("xrc-post-day-limit").value, 1, 10000, DEFAULTS.postDailyLimit), consecutiveFailureLimit: clamp(byId("xrc-failure-limit").value, 1, 50, DEFAULTS.consecutiveFailureLimit) };
     Object.assign(state.settings, values); await chrome.storage.local.set(values); toast("设置已保存");
   }
 
@@ -599,6 +623,7 @@
       postImageSelectionMode: byId("xrc-post-image-selection").value || "random",
       postHourlyLimit: clamp(byId("xrc-post-hour-limit").value, 1, 1000, DEFAULTS.postHourlyLimit),
       postDailyLimit: clamp(byId("xrc-post-day-limit").value, 1, 10000, DEFAULTS.postDailyLimit),
+      safeguardsEnabled: byId("xrc-safeguards-enabled").checked,
       activeHoursEnabled: byId("xrc-active-hours-enabled").checked,
       activeHourStart: byId("xrc-active-start").value || DEFAULTS.activeHourStart,
       activeHourEnd: byId("xrc-active-end").value || DEFAULTS.activeHourEnd,
@@ -1655,14 +1680,14 @@
       Object.assign(job, resumedAfterMedia);
       if (!runningJobs["autoJob"]) return;
       if (!await waitForSendWindow("reply", job, "autoJob")) { runningJobs["autoJob"] = null; return; }
-      // Final pre-click fence: re-read job, verify not paused, same runId, editor still connected.
+      // Final pre-click fence: re-read job, verify not paused, same runId, editor still connected,
+      // then acquire ONE fresh button from the strict composer scope and validate it.
       const freshJob = (await chrome.storage.local.get("autoJob")).autoJob;
       if (!freshJob?.active || freshJob.paused || freshJob._runId !== myRunId || !freshJob.ownerTabId || freshJob.ownerTabId !== state.tabId) { runningJobs["autoJob"] = null; return; }
       if (!activeEditor?.isConnected) { runningJobs["autoJob"] = null; return; }
-      if (!scopeContainsElement(activeEditor, sendButton)) { runningJobs["autoJob"] = null; return retryCurrentStep(job, tweet, "buttonRetries", "发送按钮已脱离回复框", 1); }
       if (!editorTextMatches(readEditorText(activeEditor), expectedText)) { runningJobs["autoJob"] = null; return retryCurrentStep(job, tweet, "fillRetries", "回复文字在发送前被清空", 1); }
       const button = findSendButtonStrict(activeEditor);
-      if (!button) { runningJobs["autoJob"] = null; return retryCurrentStep(job, tweet, "buttonRetries", "发送按钮在发送前失效", 1); }
+      if (!button || !scopeContainsElement(activeEditor, button)) { runningJobs["autoJob"] = null; return retryCurrentStep(job, tweet, "buttonRetries", "发送按钮不在当前回复框中", 1); }
       button.click();
       showJobBar(`正在确认第 ${job.sent + 1}/${target} 条是否发送成功…`);
       const submission = await waitForReplySubmission(30000, expectedText);
@@ -1976,9 +2001,12 @@
     const fileSel = 'input[data-testid="fileInput"][type="file"], input[type="file"][accept*="image"]';
     for (const scope of scopes) {
       const input = scope.querySelector(fileSel);
-      if (input) return input;
+      if (input && isVisibleElement(input)) return input;
     }
-    return null;
+    // Broader fallback: X may place the file input in a toolbar outside the
+    // send-button container but still inside the dialog area.  Search the
+    // entire document filtered by visibility and pick the first that matches.
+    return [...document.querySelectorAll(fileSel)].find(isVisibleElement) || null;
   }
   function scopeContainsElement(editor, child) {
     if (!editor?.isConnected || !child?.isConnected) return false;
@@ -2042,6 +2070,7 @@
     const matched = tokens.filter((token) => actualLower.includes(token)).length;
     return matched / tokens.length >= 0.75;
   }
+  function updateSafeguardsUi() { const enabled = byId("xrc-safeguards-enabled")?.checked; byId("xrc-safeguards-body")?.classList.toggle("xrc-hidden", !enabled); }
   function updateDelayModeUi() { const random = byId("xrc-delaymode")?.value === "random"; byId("xrc-fixed-delay")?.classList.toggle("xrc-hidden", random); byId("xrc-random-delay")?.classList.toggle("xrc-hidden", !random); }
   function updateReplySourceUi() { const specified = byId("xrc-source")?.value === "specified"; byId("xrc-specified-settings")?.classList.toggle("xrc-hidden", !specified); byId("xrc-ai-settings")?.classList.toggle("xrc-hidden", specified); }
   function parseSpecifiedReplies(value, applyLimit = true) { const items = Array.isArray(value) ? value : String(value || "").split(/\n\s*\n+/); const cleaned = items.map((text) => String(text || "").trim()).filter(Boolean); return applyLimit ? cleaned.map((text) => fitReply(text, state.settings.maxChars)) : cleaned; }
@@ -3039,18 +3068,15 @@
         }
       },
       {
-        name: "dom-input",
+        name: "paste-retry",
         run: () => {
-          activeEditor.replaceChildren(document.createTextNode(text));
-          try {
-            activeEditor.dispatchEvent(new InputEvent("input", {
-              bubbles: true, composed: true, inputType: "insertText", data: text
-            }));
-          } catch {
-            activeEditor.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-          }
-          activeEditor.dispatchEvent(new Event("change", { bubbles: true }));
-          return true;
+          const transfer = new DataTransfer();
+          transfer.setData("text/plain", text);
+          activeEditor.focus();
+          selectEditorContents(activeEditor);
+          return activeEditor.dispatchEvent(new ClipboardEvent("paste", {
+            bubbles: true, cancelable: true, composed: true, clipboardData: transfer
+          }));
         }
       }
     ];
@@ -3200,6 +3226,7 @@
   }
   function getActiveHoursLabel() { return `${state.settings.activeHourStart || "00:00"}–${state.settings.activeHourEnd || "00:00"}`; }
   async function getSendWindowState(kind, now = new Date()) {
+    if (!state.settings.safeguardsEnabled) return { blocked: false, wakeAt: null, reasons: [], primary: null, hourCount: 0, hourLimit: 0, dayCount: 0, dayLimit: 0 };
     const usage = await readUsage();
     const { day, hour } = currentUsageBuckets(now);
     const hourCount = usage.lastHour === hour ? Number(usage[`${kind}Hour`] || 0) : 0;

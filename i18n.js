@@ -255,7 +255,20 @@
     "后继续": "until continue",
     "自动恢复": "resumes automatically",
     "另有": "plus",
-    "项运行保护": "other safeguards"
+    "项运行保护": "other safeguards",
+    "方案与 API": "Profile & API",
+    "回复内容": "Reply content",
+    "发送设置": "Send settings",
+    "运行保护": "Safeguards",
+    "启用运行保护": "Enable safeguards",
+    "快速操作": "Quick actions",
+    "采集与循环": "Collect & Loop",
+    "方案与目标": "Profile & destination",
+    "发帖内容": "Post content",
+    "循环发帖": "Post loop",
+    "默认关闭；开启后限制发送频率与时段": "Off by default; when enabled, rate-limits and active-hour rules apply",
+    "评论与发帖的活跃时段和熔断共享上面设置。": "Active hours and failure cutoff apply to both replies and posts.",
+    "每个浏览器环境独立计数。评论与发帖的活跃时段和熔断共享上面设置。": "Usage is per browser profile. Active hours and failure cutoff apply to both replies and posts."
   };
 
   const RULES = [
