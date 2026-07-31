@@ -150,7 +150,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.2</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.3</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -2898,18 +2898,18 @@
   async function waitForReplySubmission(timeoutMs, expectedText, allowRecentOwnPost = true) {
     const deadline = Date.now() + timeoutMs;
     const sendTime = Date.now();
-    await delay(800);
+    await delay(400);
     while (Date.now() < deadline) {
       const pageText = String(document.querySelector("main")?.innerText || "");
       if (/你已经发过了|you(?:'ve| have)? already (?:sent|posted)/i.test(pageText)) return "duplicate";
       if (hasRecentMatchingReply(expectedText)) return "sent";
       if (/出错了.{0,30}(?:再试一次|try again)|something went wrong/i.test(pageText)) return "failed";
-      // After 8s without full-text match, accept any recent self-post as sent.
-      if (allowRecentOwnPost && Date.now() - sendTime > 8000 && hasAnyRecentOwnPost(30000)) {
+      // After 6s without full-text match, accept any recent self-post as sent.
+      if (allowRecentOwnPost && Date.now() - sendTime > 6000 && hasAnyRecentOwnPost(30000)) {
         const editor = findReplyEditor();
         if (!editor || !readEditorText(editor)) return "sent";
       }
-      await delay(400);
+      await delay(250);
     }
     return "timeout";
   }
@@ -3113,8 +3113,6 @@
       {
         name: "dom-fallback",
         run: () => {
-          // X's contenteditable may block execCommand.  Replace DOM children
-          // directly and fire the events that X's Lexical layer listens for.
           activeEditor.focus();
           activeEditor.replaceChildren(document.createTextNode(text));
           try {
@@ -3122,12 +3120,15 @@
               bubbles: true, cancelable: false, composed: true,
               inputType: "insertText", data: text
             }));
-          } catch { /* beforeinput may not be constructable */ }
+          } catch {}
           activeEditor.dispatchEvent(new InputEvent("input", {
             bubbles: true, cancelable: false, composed: true,
             inputType: "insertText", data: text
           }));
           activeEditor.dispatchEvent(new Event("change", { bubbles: true }));
+          // Last-ditch: execCommand insertText AFTER replaceChildren to
+          // push text into X's Lexical state before the DOM is reconciled.
+          try { document.execCommand("insertText", false, text); } catch {}
         }
       }
     ];
@@ -3135,25 +3136,27 @@
     for (let index = 0; index < strategies.length; index += 1) {
       activeEditor = activeEditor?.isConnected ? activeEditor : findReplyEditor();
       if (!activeEditor) break;
-      activeEditor.focus();
-      selectEditorContents(activeEditor);
-      try {
-        const fn = strategies[index].run;
-        await fn();
-      } catch {
-        continue;
+      // For insertText, retry once if first attempt doesn't stick.
+      const maxAttempts = index === 0 ? 2 : 1;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        activeEditor.focus();
+        selectEditorContents(activeEditor);
+        try {
+          const fn = strategies[index].run;
+          await fn();
+        } catch { continue; }
+        await delay(250);
+        activeEditor = activeEditor?.isConnected ? activeEditor : findReplyEditor();
+        actualText = readEditorText(activeEditor);
+        if (editorTextMatches(actualText, text)) {
+          return { editor: activeEditor, text, actualText, complete: true, method: strategies[index].name };
+        }
+        if (attempt < maxAttempts - 1) await delay(200);
       }
-      await delay(500);
-      activeEditor = activeEditor?.isConnected ? activeEditor : findReplyEditor();
-      actualText = readEditorText(activeEditor);
-      if (editorTextMatches(actualText, text)) {
-        return { editor: activeEditor, text, actualText, complete: true, method: strategies[index].name };
-      }
-      // Quick clear: only if the strategy produced wrong text, not nothing.
       if (actualText && index < strategies.length - 1) {
         selectEditorContents(activeEditor);
         document.execCommand("delete", false);
-        await delay(100);
+        await delay(80);
       }
     }
     return { editor: activeEditor, text, actualText, complete: false, method: "none" };
