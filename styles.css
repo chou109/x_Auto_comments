@@ -77,6 +77,7 @@
 #xrc-root header { height:56px; padding:9px 14px; }
 #xrc-root header strong { font-size:17px; line-height:1.25; }
 #xrc-root header small { display:block; margin-top:2px; font-size:11px; }
+#xrc-root header .xrc-version { color:#00ba7c; font-size:10px; font-weight:700; }
 #xrc-root header button { width:34px; height:34px; padding:0; border-radius:50%; line-height:34px; }
 #xrc-root header .xrc-language-toggle { width:auto; min-width:34px; padding:0 8px; border:1px solid #536471; border-radius:8px; color:#8ecdf7; font-size:12px; font-weight:700; line-height:32px; }
 #xrc-root header button:hover { background:#16181c; }
