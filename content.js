@@ -43,6 +43,8 @@
     imageCount: 1,
     imageSelectionMode: "random",
     imageLibrary: [],
+    autoLikeReply: false,
+    autoLikePost: false,
     postSource: "specified",
     postSpecifiedContents: [],
     postSpecifiedOrder: "sequential",
@@ -148,7 +150,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.1</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.2</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -252,6 +254,7 @@
             <div class="xrc-details-body">
             <label>单条回复字符上限 <span>X 普通回复最多 280</span><input id="xrc-maxchars" type="number" min="20" max="280"></label>
             <label>自动回复数量<input id="xrc-autocount" type="number" min="1" max="2000"></label>
+            <label class="xrc-check"><input id="xrc-auto-like-reply" type="checkbox"> 发送后给自己的回复点赞</label>
             <label>自动发送间隔模式<select id="xrc-delaymode"><option value="fixed">固定时间</option><option value="random">随机时间区间</option></select></label>
             <div id="xrc-fixed-delay"><label>固定间隔（秒） <span>最低 1 秒</span><input id="xrc-delay" type="number" min="1" max="600"></label></div>
             <div id="xrc-random-delay" class="xrc-grid"><label>随机最小秒数<input id="xrc-delay-min" type="number" min="1" max="600"></label><label>随机最大秒数<input id="xrc-delay-max" type="number" min="1" max="600"></label></div>
@@ -328,6 +331,7 @@
             <div class="xrc-details-body">
             <label>单条帖子字符上限 <span>X 普通帖子最多 280</span><input id="xrc-post-maxchars" type="number" min="20" max="280"></label>
             <label>自动发帖数量<input id="xrc-post-count" type="number" min="1" max="2000"></label>
+            <label class="xrc-check"><input id="xrc-auto-like-post" type="checkbox"> 发送后给自己的帖子点赞</label>
             <label>发帖间隔模式<select id="xrc-post-delaymode"><option value="fixed">固定时间</option><option value="random">随机时间区间</option></select></label>
             <div id="xrc-post-fixed-delay"><label>固定间隔（秒）<input id="xrc-post-delay" type="number" min="1" max="86400"></label></div>
             <div id="xrc-post-random-delay" class="xrc-grid"><label>随机最小秒数<input id="xrc-post-delay-min" type="number" min="1" max="86400"></label><label>随机最大秒数<input id="xrc-post-delay-max" type="number" min="1" max="86400"></label></div>
@@ -471,6 +475,7 @@
     setVal("xrc-maxchars", state.settings.maxChars);
     setVal("xrc-suggestions", state.settings.suggestionCount);
     setVal("xrc-autocount", state.settings.autoReplyCount);
+    setChk("xrc-auto-like-reply", state.settings.autoLikeReply);
     setVal("xrc-delay", state.settings.autoDelaySeconds);
     setVal("xrc-delaymode", state.settings.delayMode);
     setVal("xrc-delay-min", state.settings.randomDelayMin);
@@ -492,6 +497,7 @@
     setVal("xrc-post-prompt", state.settings.postAiPrompt);
     setVal("xrc-post-maxchars", state.settings.postMaxChars);
     setVal("xrc-post-count", state.settings.autoPostCount);
+    setChk("xrc-auto-like-post", state.settings.autoLikePost);
     setChk("xrc-post-loop-enabled", state.settings.postLoopEnabled);
     setVal("xrc-post-loop-total", state.settings.postLoopTotalLimit);
     setVal("xrc-post-loop-interval", state.settings.postLoopRoundIntervalMinutes);
@@ -596,7 +602,7 @@
     let randomDelayMin = clamp(byId("xrc-delay-min").value, 1, 600, 10);
     let randomDelayMax = clamp(byId("xrc-delay-max").value, 1, 600, 30);
     if (randomDelayMin > randomDelayMax) [randomDelayMin, randomDelayMax] = [randomDelayMax, randomDelayMin];
-    const values = { ...currentFilters(), apiKey: byId("xrc-key").value.trim(), apiBase: byId("xrc-base").value.trim() || DEFAULTS.apiBase, model: byId("xrc-model").value.trim() || DEFAULTS.model, replySource: byId("xrc-source").value, specifiedReplies: getSpecifiedRowValues(), specifiedReplyOrder: byId("xrc-specified-order").value, replyMode: byId("xrc-mode").value, customPrompt: byId("xrc-prompt").value.trim(), maxChars: clamp(byId("xrc-maxchars").value, 20, 280, 280), suggestionCount: clamp(byId("xrc-suggestions").value, 1, 10, 5), autoReplyCount: clamp(byId("xrc-autocount").value, 1, 2000, 3), autoDelaySeconds: clamp(byId("xrc-delay").value, 1, 600, 10), delayMode: byId("xrc-delaymode").value, randomDelayMin, randomDelayMax, imageUseChance: clamp(byId("xrc-image-chance").value, 0, 100, 50), imageCount: clamp(byId("xrc-image-count").value, 1, 4, 1), imageSelectionMode: byId("xrc-image-selection").value || "random", safeguardsEnabled: byId("xrc-safeguards-enabled").checked, activeHoursEnabled: byId("xrc-active-hours-enabled").checked, activeHourStart: byId("xrc-active-start").value || DEFAULTS.activeHourStart, activeHourEnd: byId("xrc-active-end").value || DEFAULTS.activeHourEnd, replyHourlyLimit: clamp(byId("xrc-reply-hour-limit").value, 1, 1000, DEFAULTS.replyHourlyLimit), replyDailyLimit: clamp(byId("xrc-reply-day-limit").value, 1, 10000, DEFAULTS.replyDailyLimit), postHourlyLimit: clamp(byId("xrc-post-hour-limit").value, 1, 1000, DEFAULTS.postHourlyLimit), postDailyLimit: clamp(byId("xrc-post-day-limit").value, 1, 10000, DEFAULTS.postDailyLimit), consecutiveFailureLimit: clamp(byId("xrc-failure-limit").value, 1, 50, DEFAULTS.consecutiveFailureLimit) };
+    const values = { ...currentFilters(), apiKey: byId("xrc-key").value.trim(), apiBase: byId("xrc-base").value.trim() || DEFAULTS.apiBase, model: byId("xrc-model").value.trim() || DEFAULTS.model, replySource: byId("xrc-source").value, specifiedReplies: getSpecifiedRowValues(), specifiedReplyOrder: byId("xrc-specified-order").value, replyMode: byId("xrc-mode").value, customPrompt: byId("xrc-prompt").value.trim(), maxChars: clamp(byId("xrc-maxchars").value, 20, 280, 280), suggestionCount: clamp(byId("xrc-suggestions").value, 1, 10, 5), autoReplyCount: clamp(byId("xrc-autocount").value, 1, 2000, 3), autoDelaySeconds: clamp(byId("xrc-delay").value, 1, 600, 10), delayMode: byId("xrc-delaymode").value, randomDelayMin, randomDelayMax, imageUseChance: clamp(byId("xrc-image-chance").value, 0, 100, 50), imageCount: clamp(byId("xrc-image-count").value, 1, 4, 1), imageSelectionMode: byId("xrc-image-selection").value || "random", autoLikeReply: byId("xrc-auto-like-reply").checked, safeguardsEnabled: byId("xrc-safeguards-enabled").checked, activeHoursEnabled: byId("xrc-active-hours-enabled").checked, activeHourStart: byId("xrc-active-start").value || DEFAULTS.activeHourStart, activeHourEnd: byId("xrc-active-end").value || DEFAULTS.activeHourEnd, replyHourlyLimit: clamp(byId("xrc-reply-hour-limit").value, 1, 1000, DEFAULTS.replyHourlyLimit), replyDailyLimit: clamp(byId("xrc-reply-day-limit").value, 1, 10000, DEFAULTS.replyDailyLimit), postHourlyLimit: clamp(byId("xrc-post-hour-limit").value, 1, 1000, DEFAULTS.postHourlyLimit), postDailyLimit: clamp(byId("xrc-post-day-limit").value, 1, 10000, DEFAULTS.postDailyLimit), consecutiveFailureLimit: clamp(byId("xrc-failure-limit").value, 1, 50, DEFAULTS.consecutiveFailureLimit) };
     Object.assign(state.settings, values); await chrome.storage.local.set(values); toast("设置已保存");
   }
 
@@ -623,6 +629,7 @@
       postImageUseChance: clamp(byId("xrc-post-image-chance").value, 0, 100, 50),
       postImageCount: clamp(byId("xrc-post-image-count").value, 1, 4, 1),
       postImageSelectionMode: byId("xrc-post-image-selection").value || "random",
+      autoLikePost: byId("xrc-auto-like-post").checked,
       postHourlyLimit: clamp(byId("xrc-post-hour-limit").value, 1, 1000, DEFAULTS.postHourlyLimit),
       postDailyLimit: clamp(byId("xrc-post-day-limit").value, 1, 10000, DEFAULTS.postDailyLimit),
       safeguardsEnabled: byId("xrc-safeguards-enabled").checked,
@@ -1717,6 +1724,7 @@
       Object.assign(job, committed);
       await recordSuccessfulSend("reply");
       await rememberReplied(tweet.url);
+      if (state.settings.autoLikeReply) likeMostRecentOwnPost().catch(() => {});
       const waitSeconds = chooseJobDelay(job);
       showJobBar(`已发送 ${job.sent}/${target}，等待 ${waitSeconds} 秒；同时预生成下一条…`);
       await delay(500);
@@ -2373,6 +2381,7 @@
     job.retries = 0;
     job.failureStreak = 0;
     await recordSuccessfulSend("post");
+    if (state.settings.autoLikePost) likeMostRecentOwnPost().catch(() => {});
     await chrome.storage.local.set({ postJob: job });
     return continuePostJob(job);
   }
@@ -2903,6 +2912,26 @@
       await delay(400);
     }
     return "timeout";
+  }
+  async function likeMostRecentOwnPost() {
+    const profileHref = document.querySelector('[data-testid="AppTabBar_Profile_Link"]')?.getAttribute("href") || "";
+    const myHandle = profileHref.split("/").filter(Boolean)[0]?.toLowerCase();
+    if (!myHandle) return;
+    await delay(1000);
+    const articles = [...document.querySelectorAll('article[data-testid="tweet"]')];
+    for (const article of articles) {
+      const time = article.querySelector("time");
+      const href = time?.closest('a[href*="/status/"]')?.getAttribute("href") || "";
+      const author = href.split("/").filter(Boolean)[0]?.toLowerCase();
+      if (author !== myHandle) continue;
+      const timestamp = Date.parse(time?.dateTime || "");
+      if (!Number.isFinite(timestamp) || Date.now() - timestamp > 60000) break;
+      // Found the most recent own post — click its like button.
+      const likeBtn = article.querySelector('[data-testid="like"]');
+      if (!likeBtn || likeBtn.getAttribute("aria-disabled") === "true") continue;
+      try { likeBtn.click(); } catch {}
+      return;
+    }
   }
   function hasAnyRecentOwnPost(timeWindowMs) {
     const profileHref = document.querySelector('[data-testid="AppTabBar_Profile_Link"]')?.getAttribute("href") || "";

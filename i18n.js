@@ -268,7 +268,9 @@
     "循环发帖": "Post loop",
     "默认关闭；开启后限制发送频率与时段": "Off by default; when enabled, rate-limits and active-hour rules apply",
     "评论与发帖的活跃时段和熔断共享上面设置。": "Active hours and failure cutoff apply to both replies and posts.",
-    "每个浏览器环境独立计数。评论与发帖的活跃时段和熔断共享上面设置。": "Usage is per browser profile. Active hours and failure cutoff apply to both replies and posts."
+    "每个浏览器环境独立计数。评论与发帖的活跃时段和熔断共享上面设置。": "Usage is per browser profile. Active hours and failure cutoff apply to both replies and posts.",
+    "发送后给自己的回复点赞": "Like own reply after sending",
+    "发送后给自己的帖子点赞": "Like own post after sending"
   };
 
   const RULES = [
