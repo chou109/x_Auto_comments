@@ -1993,6 +1993,11 @@
       const enabled = buttons.find((b) => b.getAttribute("aria-disabled") !== "true" && !b.disabled);
       if (enabled) return enabled;
     }
+    // X may render the send-button toolbar outside the composer container.
+    // Fall back to a visible enabled button as long as there is exactly one
+    // active reply dialog — which is the case during auto-reply.
+    const dialogButtons = [...document.querySelectorAll(selector)].filter((b) => isVisibleElement(b) && b.getAttribute("aria-disabled") !== "true" && !b.disabled);
+    if (dialogButtons.length === 1) return dialogButtons[0];
     return null;
   }
   function findComposerFileInput(editor) {
@@ -2014,7 +2019,10 @@
     if (!editor?.isConnected || !child?.isConnected) return false;
     const composer = findComposerContainer(editor);
     const dialog = editor.closest('[role="dialog"]');
-    return composer?.contains(child) || dialog?.contains(child) || false;
+    if (composer?.contains(child) || dialog?.contains(child)) return true;
+    // Accept any visible enabled send button that's the only one on the page.
+    const all = [...document.querySelectorAll('[data-testid="tweetButton"], [data-testid="tweetButtonInline"]')].filter((b) => isVisibleElement(b) && b.getAttribute("aria-disabled") !== "true" && !b.disabled);
+    return all.length === 1 && all[0] === child;
   }
   function findComposerMediaPreview(editor) {
     if (!editor?.isConnected) return null;
