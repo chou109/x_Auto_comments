@@ -93,7 +93,8 @@
     const latest = await chrome.storage.local.get(storageKey);
     const job = latest[storageKey];
     if (!job?.active) return null;
-    if (job._runId && job._runId !== expectedRunId) return null;
+    if (!job._runId) return null; // legacy job without runId — refuse mutation
+    if (job._runId !== expectedRunId) return null;
     if (job.ownerTabId != null && job.ownerTabId !== state.tabId) return null;
     if (!state.tabId) return null;
     const mutated = mutate(job);
@@ -1806,6 +1807,7 @@
       showJobBar(`${reason}，正在当前页面自动恢复 ${tweet[counterKey]}/${maxRetries}…`);
       await resilientDelay(1200);
       if (!runningJobs["autoJob"]) return;
+      runningJobs["autoJob"] = null;  // release gate so resumeAutoJob can re-enter
       state.autoRunning = false;
       const fresh = (await chrome.storage.local.get("autoJob")).autoJob;
       if (!fresh?.active || fresh.paused || !fresh.ownerTabId || fresh.ownerTabId !== state.tabId) return;
@@ -1983,6 +1985,17 @@
     const composer = findComposerContainer(editor);
     const dialog = editor.closest('[role="dialog"]');
     return composer?.contains(child) || dialog?.contains(child) || false;
+  }
+  function findComposerMediaPreview(editor) {
+    if (!editor?.isConnected) return null;
+    const composer = findComposerContainer(editor);
+    const dialog = editor.closest('[role="dialog"]');
+    const scopes = [...new Set([composer, dialog].filter(Boolean))];
+    for (const scope of scopes) {
+      const preview = scope.querySelector('[data-testid="attachments"], [data-testid="removeMedia"], [data-testid="mediaPreview"], img[src^="blob:"]');
+      if (preview) return preview;
+    }
+    return null;
   }
   async function hasExistingReply(tweet) {
     const key = normalizeTweetUrl(tweet.url);
