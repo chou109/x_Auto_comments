@@ -3053,31 +3053,30 @@
     const strategies = [
       {
         name: "insertText",
-        run: () => document.execCommand("insertText", false, text)
+        run: () => { document.execCommand("insertText", false, text); }
       },
       {
         name: "insertHTML",
-        run: () => document.execCommand("insertHTML", false, escapeHtml(text))
-      },
-      {
-        name: "native-paste",
-        run: async () => {
-          try {
-            await navigator.clipboard.writeText(text);
-            return document.execCommand("paste");
-          } catch { return false; }
-        }
+        run: () => { document.execCommand("insertHTML", false, escapeHtml(text)); }
       },
       {
         name: "dom-fallback",
         run: () => {
+          // X's contenteditable may block execCommand.  Replace DOM children
+          // directly and fire the events that X's Lexical layer listens for.
           activeEditor.focus();
           activeEditor.replaceChildren(document.createTextNode(text));
-          try { activeEditor.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: text })); } catch {}
-          const inputEvent = new InputEvent("input", { bubbles: true, cancelable: false, inputType: "insertText", data: text, composed: true });
-          activeEditor.dispatchEvent(inputEvent);
+          try {
+            activeEditor.dispatchEvent(new InputEvent("beforeinput", {
+              bubbles: true, cancelable: false, composed: true,
+              inputType: "insertText", data: text
+            }));
+          } catch { /* beforeinput may not be constructable */ }
+          activeEditor.dispatchEvent(new InputEvent("input", {
+            bubbles: true, cancelable: false, composed: true,
+            inputType: "insertText", data: text
+          }));
           activeEditor.dispatchEvent(new Event("change", { bubbles: true }));
-          return true;
         }
       }
     ];
@@ -3085,15 +3084,15 @@
     for (let index = 0; index < strategies.length; index += 1) {
       activeEditor = activeEditor?.isConnected ? activeEditor : findReplyEditor();
       if (!activeEditor) break;
-      if (index > 0) await clearEditorTextForRetry(activeEditor);
       activeEditor.focus();
       selectEditorContents(activeEditor);
       try {
-        strategies[index].run();
+        const fn = strategies[index].run;
+        await fn();
       } catch {
         continue;
       }
-      await delay(index === strategies.length - 1 ? 700 : 450);
+      await delay(700);
       activeEditor = activeEditor?.isConnected ? activeEditor : findReplyEditor();
       actualText = readEditorText(activeEditor);
       if (editorTextMatches(actualText, text)) {
