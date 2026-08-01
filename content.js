@@ -152,7 +152,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.14</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.15</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -877,10 +877,12 @@
     updateCollectButtons("停止账号采集", true, "account");
     const collected = new Map((job.items || []).map((tweet) => [normalizeTweetUrl(tweet.url), tweet]));
     let validItems = summarizeCollectedAccountResults([...collected.values()], job.author);
-    const passStartSize = collected.size;
     let staleRounds = 0, rounds = 0, reachedBottom = false, ageBoundaryRounds = 0, reachedAgeBoundary = false;
     const bottomTracker = createCollectionBottomTracker();
-    window.scrollTo({ top: 0, behavior: "auto" }); await delay(1200);
+    let bottomRecoveries = 0;
+    if (!collected.size) window.scrollTo({ top: 0, behavior: "auto" });
+    await delay(1200);
+    let lastScrollTop = Number((document.scrollingElement || document.documentElement)?.scrollTop || 0);
     while (!state.collectStop && validItems.length < job.limit) {
       if (!await waitUntilLoopCollectionResumed(job)) break;
       let added = 0;
@@ -892,7 +894,12 @@
         collected.set(key, serializableTweet(tweet)); added += 1;
       }
       if (added) validItems = summarizeCollectedAccountResults([...collected.values()], job.author);
-      staleRounds = added ? 0 : staleRounds + 1; rounds += 1;
+      const scrollTop = Number((document.scrollingElement || document.documentElement)?.scrollTop || 0);
+      const viewportMoved = Math.abs(scrollTop - lastScrollTop) >= 120;
+      lastScrollTop = scrollTop;
+      staleRounds = added || viewportMoved ? 0 : staleRounds + 1;
+      if (added) bottomRecoveries = 0;
+      rounds += 1;
       reachedBottom = updateCollectionBottomTracker(bottomTracker, added);
       ageBoundaryRounds = accountTimelinePastAgeLimit(job.author) ? ageBoundaryRounds + 1 : 0;
       reachedAgeBoundary = ageBoundaryRounds >= 3;
@@ -906,8 +913,20 @@
       // viewport checks contain only posts older than the configured age
       // window, scrolling farther cannot produce another valid recent post.
       if (reachedAgeBoundary) break;
-      if (reachedBottom || staleRounds >= 40) {
-        return continueCollectionUntilValid(job, collected, validItems.length, passStartSize, "account");
+      // X virtualizes profile timelines and can pause briefly at the current
+      // bottom. Recover in place so a persisted dedupe cache never causes a
+      // reload loop that repeatedly starts from the newest posts.
+      if (reachedBottom || staleRounds >= 12) {
+        bottomRecoveries += 1;
+        if (bottomRecoveries > 6) break;
+        job.items = [...collected.values()];
+        await chrome.storage.local.set({ collectJob: job });
+        updateCollectButtons(`停止账号采集（有效 ${Math.min(validItems.length, job.limit)}/${job.limit}，已扫描 ${collected.size}；正在加载更早帖子 ${bottomRecoveries}/6）`, true, "account");
+        await recoverAccountTimeline(bottomTracker, bottomRecoveries);
+        reachedBottom = false;
+        staleRounds = 0;
+        lastScrollTop = Number((document.scrollingElement || document.documentElement)?.scrollTop || 0);
+        continue;
       }
       scrollCollectionPage(rounds);
       await resilientDelay(900);
@@ -921,6 +940,18 @@
     updateCollectButtons("", false);
     validItems = summarizeCollectedAccountResults(job.items, job.author);
     state.tweets = sortTweets(validItems).slice(0, job.limit);
+    const stats = validItems._stats || {};
+    job.resultSummary = {
+      scanned: collected.size,
+      kept: state.tweets.length,
+      keywordMisses: stats.keywordMisses || 0,
+      replies: stats.replies || 0,
+      quotes: stats.quotes || 0,
+      alreadyReplied: stats.alreadyReplied || 0,
+      lowLikes: stats.lowLikes || 0,
+      tooOld: stats.tooOld || 0,
+      noAuthor: stats.noAuthor || 0
+    };
     renderList(); switchTab("queue");
     if (job.loop) return handleLoopCollectionComplete(job, state.tweets);
     const reason = state.tweets.length >= job.limit
@@ -929,7 +960,9 @@
         ? "已手动停止"
         : reachedAgeBoundary
           ? `已到达最近 ${state.settings.maxAgeDays} 天的日期边界`
-          : "采集任务已结束";
+          : reachedBottom
+            ? "X 时间线已连续多次没有加载更早帖子"
+            : "采集任务已结束";
     const statsMsg = buildAccountStatsMessage(validItems);
     const hint = state.tweets.length < 5 ? `（可尝试：降低点赞门槛、取消排除回复/引用、增加天数范围）` : "";
     toast(`${reason}；实际扫描 ${collected.size} 条，保留 ${state.tweets.length} 条${statsMsg}${hint}`);
@@ -1151,6 +1184,18 @@
     return tracker.stableRounds >= 4;
   }
 
+  async function recoverAccountTimeline(tracker, attempt) {
+    const upward = -Math.max(Math.round(window.innerHeight * 0.4), 320);
+    const downward = Math.max(Math.round(window.innerHeight * 1.6), 1200);
+    window.scrollBy({ top: upward, behavior: "auto" });
+    await resilientDelay(500);
+    window.scrollBy({ top: downward, behavior: "auto" });
+    await resilientDelay(Math.min(5000, 1500 + Math.max(0, Number(attempt) || 0) * 500));
+    const scroller = document.scrollingElement || document.documentElement;
+    tracker.lastHeight = Math.max(scroller?.scrollHeight || 0, document.body?.scrollHeight || 0);
+    tracker.stableRounds = 0;
+  }
+
   function matchesCollectedSearchResult(tweet) {
     // The X search query has already applied keyword, min_faves and since.
     // Body-only verification is optional because enforcing it can discard
@@ -1206,7 +1251,7 @@
   async function beginReplyLoopRound(job) {
     if (!job?.active || job.paused) return;
     if (job.sent >= job.totalLimit) return finishReplyLoop(job, `已达到总发送上限 ${job.totalLimit}`);
-    job.phase = "collecting"; job.nextRoundAt = null;
+    job.phase = "collecting"; job.nextRoundAt = null; delete job.lastStatus;
     await chrome.storage.local.set({ replyLoopJob: job });
     const collectJob = {
       active: true, loop: true, mode: job.mode, limit: job.roundLimit, items: [],
@@ -1226,8 +1271,8 @@
       targetUrl = `https://x.com/${job.author}`;
     }
     await chrome.storage.local.set({ collectJob });
-    if (location.href !== targetUrl) location.href = targetUrl;
-    else resumeCollectionJob(collectJob);
+    if (location.href !== targetUrl) { location.href = targetUrl; return; }
+    return resumeCollectionJob(collectJob);
   }
 
   async function handleLoopCollectionComplete(collectJob, tweets) {
@@ -1239,7 +1284,6 @@
     if (!candidates.length) {
       loop.emptyRounds = (loop.emptyRounds || 0) + 1;
       loop.skipped = (loop.skipped || 0) + (tweets?.length || 0);
-      if (collectJob?.reachedBottom) return finishReplyLoop(loop, "已滚动到帖子列表底部，循环自动结束");
       const summary = collectJob?.resultSummary;
       const details = summary
         ? `；扫描 ${summary.scanned} 条，排除：正文未命中 ${summary.keywordMisses}、Reply ${summary.replies}、Quote ${summary.quotes}、已回复 ${summary.alreadyReplied}、赞不够 ${summary.lowLikes}、太旧 ${summary.tooOld}${summary.noAuthor ? `、作者不符 ${summary.noAuthor}` : ""}`
@@ -1249,7 +1293,8 @@
     }
     loop.emptyRounds = 0;
     loop.phase = "replying";
-    loop.stopAfterRound = Boolean(collectJob?.reachedBottom);
+    loop.stopAfterRound = false;
+    delete loop.lastStatus;
     await chrome.storage.local.set({ replyLoopJob: loop });
     state.tweets = sortTweets(candidates);
     renderList();
@@ -1262,22 +1307,31 @@
   async function scheduleNextReplyLoopRound(loop, reason) {
     loop.phase = "waiting";
     loop.nextRoundAt = Date.now() + Math.max(1, loop.intervalMinutes) * 60000;
+    loop.lastStatus = `${reason}；等待 ${loop.intervalMinutes} 分钟后继续`;
     await chrome.storage.local.set({ replyLoopJob: loop });
-    updateReplyLoopStatus(loop, `${reason}；等待 ${loop.intervalMinutes} 分钟后继续`);
+    updateReplyLoopStatus(loop, loop.lastStatus);
     return resumeReplyLoop(loop);
   }
 
   async function resumeReplyLoop(loop) {
-    if (!await claimJobLease(loop, "replyLoopJob")) return;
-    if (!loop?.active || loop.paused || state.autoRunning || state.collecting || state.postRunning) return;
-    updateReplyLoopStatus(loop);
-    while (loop.nextRoundAt && Date.now() < loop.nextRoundAt) {
-      const latest = (await chrome.storage.local.get("replyLoopJob")).replyLoopJob;
-      if (!latest?.active || latest.paused) return;
-      Object.assign(loop, latest);
-      await resilientDelay(Math.min(1000, loop.nextRoundAt - Date.now()));
+    if (runningJobs["replyLoopJob"]) return;
+    runningJobs["replyLoopJob"] = true;
+    let readyForNextRound = false;
+    try {
+      if (!await claimJobLease(loop, "replyLoopJob")) return;
+      if (!loop?.active || loop.paused || state.autoRunning || state.collecting || state.postRunning) return;
+      updateReplyLoopStatus(loop);
+      while (loop.nextRoundAt && Date.now() < loop.nextRoundAt) {
+        const latest = (await chrome.storage.local.get("replyLoopJob")).replyLoopJob;
+        if (!latest?.active || latest.paused) return;
+        Object.assign(loop, latest);
+        await resilientDelay(Math.min(1000, loop.nextRoundAt - Date.now()));
+      }
+      readyForNextRound = true;
+    } finally {
+      runningJobs["replyLoopJob"] = null;
     }
-    return beginReplyLoopRound(loop);
+    if (readyForNextRound) return beginReplyLoopRound(loop);
   }
 
   async function stopReplyLoop() {
@@ -1331,7 +1385,9 @@
 
   function updateReplyLoopStatus(loop, text = "") {
     const node = byId("xrc-loop-status"); if (!node) return;
-    const status = text || (loop?.active
+    const status = text || (loop?.active && loop.phase === "waiting" && loop.lastStatus
+      ? loop.lastStatus
+      : loop?.active
       ? `运行中：已发送 ${loop.sent || 0}/${loop.totalLimit}，第 ${loop.rounds || 0} 轮，阶段 ${loop.phase || "准备"}`
       : "达到总上限后自动结束；再次运行必须重新点击开始。");
     node.textContent = localizeText(status);
@@ -1657,7 +1713,10 @@
       const replyPool = Array.isArray(result?.replies) ? result.replies : [];
       const replies = (job.replySource === "specified" ? replyPool : replyPool.slice(0, job.suggestionCount || 1))
         .map((reply) => fitReply(reply, job.maxChars || state.settings.maxChars));
-      if (!replies.length) return advanceSkippedJob(job, "回复内容生成失败");
+      if (!replies.length) {
+        if (job.replySource === "ai") return pauseAutoJobWithReason(job, "AI 回复生成失败，任务已暂停；请检查 API 设置后点击继续");
+        return advanceSkippedJob(job, "回复内容生成失败");
+      }
       const resumedAfterGeneration = await waitUntilJobResumed(job);
       if (!resumedAfterGeneration || resumedAfterGeneration._runId !== myRunId) { runningJobs["autoJob"] = null; return; }
       Object.assign(job, resumedAfterGeneration);
@@ -2058,12 +2117,15 @@
     const prefetched = await waitForAiPrefetch(job, index);
     if (prefetched.status === "ready") return { replies: prefetched.replies };
     if (prefetched.status === "stopped") return null;
-    if (prefetched.status === "missing") {
-      showJobBar("后台预生成队列未就绪，正在直接请求 AI…");
+    if (["missing", "error", "timeout"].includes(prefetched.status)) {
+      const reason = prefetched.status === "error"
+        ? `后台预生成失败：${localizeError(prefetched.error)}`
+        : prefetched.status === "timeout"
+          ? "后台预生成等待超时"
+          : "后台预生成队列未就绪";
+      showJobBar(`${reason}，正在直接请求 AI…`);
       return sendAi(tweet, 1, job);
     }
-    const error = prefetched.error || { code: "timeout", detail: "AI prefetch timeout" };
-    toast(`AI 预生成失败：${localizeError(error)}`, true);
     return null;
   }
 
