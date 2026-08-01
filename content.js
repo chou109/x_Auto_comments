@@ -81,6 +81,8 @@
   const delayWaiters = new Set();
   const ownerInstanceId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const runningJobs = {};
+  const AI_PREFETCH_CACHE_KEY = "xrcAiReplyPrefetch";
+  const AI_PREFETCH_BUFFER_SIZE = 3;
   function ownsJobFence(job) { return job?.ownerTabId === state.tabId && state.tabId != null; }
   function makeRunId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`; }
   async function readRunnableJob(storageKey) {
@@ -150,7 +152,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.13</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.14</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -1283,7 +1285,10 @@
     for (const wake of [...delayWaiters]) wake();
     const saved = await chrome.storage.local.get(["replyLoopJob", "autoJob", "collectJob"]);
     await chrome.storage.local.remove(["replyLoopJob", "collectJob"]);
-    if (saved.autoJob?.loop) await chrome.storage.local.remove("autoJob");
+    if (saved.autoJob?.loop) {
+      clearAiPrefetch(saved.autoJob._runId);
+      await chrome.storage.local.remove("autoJob");
+    }
     state.collectStop = true; state.autoStop = true; state.autoRunning = false;
     for (const wake of [...delayWaiters]) wake();
     const currentRoundSent = saved.autoJob?.loop ? (saved.autoJob.sent || 0) : 0;
@@ -1583,9 +1588,11 @@
     }
     const target = fromLoop ? Math.min(requestedTarget, candidates.length) : requestedTarget;
     const items = candidates.map(({ author, text, likes, views, ageHours, url, alreadyReplied }) => ({ author, text, likes, views, ageHours, url, alreadyReplied }));
-    const job = { active: true, paused: false, loop: Boolean(fromLoop), directMultiMode, items, requestedTarget, target, excludedAlreadyReplied: state.tweets.length - baseCandidates.length, current: 0, sent: 0, skipped: 0, returnUrl: location.href, allowRepeat: directMultiMode || state.settings.replyAlreadyReplied, replySource: state.settings.replySource, specifiedReplies: specified, specifiedReplyOrder: state.settings.specifiedReplyOrder, delayMode: state.settings.delayMode, delaySeconds: state.settings.autoDelaySeconds, randomDelayMin: state.settings.randomDelayMin, randomDelayMax: state.settings.randomDelayMax, imageUseChance: state.settings.imageUseChance, imageCount: state.settings.imageCount || 1, imageSelectionMode: state.settings.imageSelectionMode || "random", startedAt: Date.now(), ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000, failureStreak: 0, _runId: makeRunId() };
+    const job = { active: true, paused: false, loop: Boolean(fromLoop), directMultiMode, items, requestedTarget, target, excludedAlreadyReplied: state.tweets.length - baseCandidates.length, current: 0, sent: 0, skipped: 0, returnUrl: location.href, allowRepeat: directMultiMode || state.settings.replyAlreadyReplied, replySource: state.settings.replySource, specifiedReplies: specified, specifiedReplyOrder: state.settings.specifiedReplyOrder, replyMode: state.settings.replyMode, customPrompt: state.settings.customPrompt, maxChars: state.settings.maxChars, suggestionCount: 1, delayMode: state.settings.delayMode, delaySeconds: state.settings.autoDelaySeconds, randomDelayMin: state.settings.randomDelayMin, randomDelayMax: state.settings.randomDelayMax, imageUseChance: state.settings.imageUseChance, imageCount: state.settings.imageCount || 1, imageSelectionMode: state.settings.imageSelectionMode || "random", startedAt: Date.now(), ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000, failureStreak: 0, _runId: makeRunId() };
     state.autoStatus = `正在创建 ${job.target} 条自动回复任务 · ${delayDescription}`; renderList();
     await chrome.storage.local.set({ autoJob: job });
+    enqueueAiPrefetch(job, 0);
+    await delay(100);
     location.href = items[0].url;
   }
 
@@ -1608,6 +1615,7 @@
       showJobBar(`目标 ${target} 条 · 已发送 ${job.sent} · 已跳过 ${job.skipped}`);
       const tweet = job.items[job.current];
       if (!tweet || job.sent >= target) return finishAutoJob(job, `任务完成，共发送 ${job.sent} 条`);
+      if (job.replySource === "ai") enqueueAiPrefetch(job, job.current);
       if (!location.href.includes(new URL(tweet.url).pathname)) { await navigateAutoJob(job, tweet.url); runningJobs["autoJob"] = null; return; }
       const repeatProgress = tweet.directRepeatTotal ? ` · 当前帖子第 ${tweet.directRepeatIndex}/${tweet.directRepeatTotal} 条` : "";
       showJobBar(`目标发送 ${target} 条 · 候选 ${job.current + 1}/${job.items.length}${repeatProgress} · 已发送 ${job.sent} · 已跳过 ${job.skipped}`);
@@ -1643,12 +1651,12 @@
         return advanceSkippedJob(job, "恢复任务时检测到当前帖子已经发送成功");
       }
       if (!runningJobs["autoJob"]) return;
-      showJobBar(job.replySource === "specified" || tweet.preparedReplies?.length ? "正在准备回复内容…" : "正在请求 AI 生成回复（最长等待 45 秒）…");
-      const result = job.replySource === "specified" ? { replies: job.specifiedReplies } : (tweet.preparedReplies?.length ? { replies: tweet.preparedReplies } : await sendAi(tweet, 1));
+      showJobBar(job.replySource === "specified" ? "正在准备回复内容…" : "正在读取后台 AI 预生成缓存…");
+      const result = job.replySource === "specified" ? { replies: job.specifiedReplies } : await getAiReplyForJob(job, tweet, job.current);
       if (!runningJobs["autoJob"]) return;
       const replyPool = Array.isArray(result?.replies) ? result.replies : [];
-      const replies = (job.replySource === "specified" ? replyPool : replyPool.slice(0, state.settings.suggestionCount))
-        .map((reply) => fitReply(reply, state.settings.maxChars));
+      const replies = (job.replySource === "specified" ? replyPool : replyPool.slice(0, job.suggestionCount || 1))
+        .map((reply) => fitReply(reply, job.maxChars || state.settings.maxChars));
       if (!replies.length) return advanceSkippedJob(job, "回复内容生成失败");
       const resumedAfterGeneration = await waitUntilJobResumed(job);
       if (!resumedAfterGeneration || resumedAfterGeneration._runId !== myRunId) { runningJobs["autoJob"] = null; return; }
@@ -1721,10 +1729,6 @@
         latest.sent = (latest.sent || 0) + 1;
         latest.current = (latest.current || 0) + 1;
         latest.failureStreak = 0;
-        // Copy over job fields that may have updated in memory (preparedReplies, etc.)
-        if (job.items?.[latest.current]) {
-          job.items[latest.current].preparedReplies = null;
-        }
         return latest;
       });
       if (!committed) { runningJobs["autoJob"] = null; return; }
@@ -1733,20 +1737,18 @@
       await rememberReplied(tweet.url);
       if (state.settings.autoLikeReply) likeMostRecentOwnPost().catch(() => {});
       const waitSeconds = chooseJobDelay(job);
-      showJobBar(`已发送 ${job.sent}/${target}，等待 ${waitSeconds} 秒；同时预生成下一条…`);
+      enqueueAiPrefetch(job, job.current);
+      showJobBar(`已发送 ${job.sent}/${target}，等待 ${waitSeconds} 秒；后台缓存后续 ${AI_PREFETCH_BUFFER_SIZE} 条…`);
       await delay(500);
       if (!runningJobs["autoJob"]) return;
       if (job.sent >= target || job.current >= job.items.length) return finishAutoJob(job, `任务完成，共发送 ${job.sent} 条`);
-      const nextTweet = job.items[job.current];
-      const [nextResult] = job.replySource === "ai" ? await Promise.all([sendAi(nextTweet, 1), waitJobDelay(job, waitSeconds)]) : [null, await waitJobDelay(job, waitSeconds)];
+      const waited = await waitJobDelay(job, waitSeconds);
+      if (!waited) return;
       if (!runningJobs["autoJob"]) return;
       const latest = await chrome.storage.local.get("autoJob");
       if (!latest.autoJob?.active) { runningJobs["autoJob"] = null; return; }
       Object.assign(job, latest.autoJob);
-      if (Array.isArray(nextResult?.replies) && nextResult.replies.length) {
-        job.items[job.current].preparedReplies = nextResult.replies.slice(0, state.settings.suggestionCount).map((reply) => fitReply(reply, state.settings.maxChars));
-        await chrome.storage.local.set({ autoJob: job });
-      }
+      enqueueAiPrefetch(job, job.current);
       await navigateAutoJob(job, job.items[job.current].url);
     } catch (error) {
       console.error("[XRC] 自动回复任务异常", error);
@@ -1779,6 +1781,7 @@
     for (const wake of [...delayWaiters]) wake();
     const saved = await chrome.storage.local.get("autoJob");
     const job = saved.autoJob;
+    clearAiPrefetch(job?._runId);
     await chrome.storage.local.remove("autoJob");
     state.autoRunning = false;
     state.autoStop = true;
@@ -1825,10 +1828,12 @@
     const saved = await chrome.storage.local.get("autoJob");
     const job = saved.autoJob;
     if (!job?.active) return toast("当前没有正在运行的自动回复任务", true);
+    const previousRunId = job._runId;
     job.paused = Boolean(paused);
     if (job.paused) {
       delete job.waitState; delete job.nextRunAt;
       job._runId = makeRunId();
+      clearAiPrefetch(previousRunId);
     }
     const shouldRestart = !job.paused && !state.autoRunning;
     if (!job.paused) {
@@ -1879,10 +1884,12 @@
   async function pauseAutoJobWithReason(job, reason) {
     runningJobs["autoJob"] = null;
     for (const wake of [...delayWaiters]) wake();
+    const previousRunId = job._runId;
     job.paused = true;
     delete job.waitState;
     delete job.nextRunAt;
     job._runId = makeRunId();
+    clearAiPrefetch(previousRunId);
     job.lastSkipReason = reason;
     await chrome.storage.local.set({ autoJob: job });
     state.autoRunning = false;
@@ -1936,6 +1943,7 @@
   async function finishAutoJob(job, message, isError = false) {
     const cleared = await clearReplyEditor();
     if (!cleared) return pauseAutoJobWithReason(job, `${message}；X 草稿无法安全清空，任务已暂停，请手动清空后继续`);
+    clearAiPrefetch(job._runId);
     if (job.loop) {
       await chrome.storage.local.remove("autoJob");
       state.autoRunning = false; showJobBar(""); updateJobLoopActions(false);
@@ -1967,6 +1975,7 @@
     job.current += 1;
     job.lastSkipReason = reason;
     await chrome.storage.local.set({ autoJob: job });
+    enqueueAiPrefetch(job, job.current);
     const target = job.target || job.items.length;
     if (job.sent >= target) return finishAutoJob(job, `任务完成：发送 ${job.sent} 条，跳过 ${job.skipped} 条`);
     if (job.current >= job.items.length) return finishAutoJob(job, `候选帖子已处理完：发送 ${job.sent} 条，跳过 ${job.skipped} 条`);
@@ -1977,10 +1986,96 @@
     location.href = job.items[job.current].url;
   }
 
-  async function sendAi(tweet, suggestionCountOverride) {
+  function enqueueAiPrefetch(job, startIndex = job?.current || 0) {
+    if (!job?.active || job.paused || job.replySource !== "ai" || !job._runId) return false;
+    const start = Math.max(0, Number(startIndex) || 0);
+    const remainingTarget = Math.max(0, Number(job.target || job.items?.length || 0) - Number(job.sent || 0));
+    const end = Math.min(job.items?.length || 0, start + AI_PREFETCH_BUFFER_SIZE, start + remainingTarget);
+    const entries = [];
+    for (let index = start; index < end; index += 1) {
+      const tweet = job.items[index];
+      if (!tweet?.url) continue;
+      entries.push({
+        index,
+        tweet: { author: tweet.author, text: tweet.text, likes: tweet.likes, views: tweet.views, ageHours: tweet.ageHours, url: tweet.url }
+      });
+    }
+    if (!entries.length) return false;
+    try {
+      chrome.runtime.sendMessage({
+        type: "AI_PREFETCH_JOB",
+        payload: {
+          runId: job._runId,
+          entries,
+          replyMode: job.replyMode || state.settings.replyMode,
+          customPrompt: job.customPrompt ?? state.settings.customPrompt,
+          maxChars: job.maxChars || state.settings.maxChars,
+          suggestionCount: 1
+        }
+      }).catch(() => {});
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function readAiPrefetchRecord(job, index) {
+    const stored = await chrome.storage.local.get(AI_PREFETCH_CACHE_KEY);
+    const key = `${job?._runId || ""}:${Number(index)}`;
+    const record = stored[AI_PREFETCH_CACHE_KEY]?.entries?.[key] || null;
+    if (!record || record.runId !== job?._runId || record.url !== job?.items?.[index]?.url) return null;
+    return record;
+  }
+
+  async function waitForAiPrefetch(job, index, timeoutMs = 95000) {
+    const startedAt = Date.now();
+    const deadline = startedAt + timeoutMs;
+    let lastRenderedSecond = -1;
+    while (Date.now() < deadline) {
+      if (!runningJobs["autoJob"]) return { status: "stopped" };
+      const record = await readAiPrefetchRecord(job, index);
+      if (record?.status === "ready" && Array.isArray(record.replies) && record.replies.length) {
+        return { status: "ready", replies: record.replies };
+      }
+      if (record?.status === "error") return { status: "error", error: record.error };
+      const elapsedMs = Date.now() - startedAt;
+      // If the background did not even create a cache record, fall back to the
+      // direct request instead of waiting through the full provider timeout.
+      if (!record && elapsedMs >= 2000) return { status: "missing" };
+      const elapsedSeconds = Math.floor(elapsedMs / 1000);
+      if (elapsedSeconds !== lastRenderedSecond) {
+        lastRenderedSecond = elapsedSeconds;
+        showJobBar(`后台 AI 正在预生成第 ${index + 1}/${job.target || job.items.length} 条 · 已等待 ${elapsedSeconds} 秒…`);
+      }
+      await delay(400);
+    }
+    return { status: "timeout" };
+  }
+
+  async function getAiReplyForJob(job, tweet, index) {
+    if (Array.isArray(tweet?.preparedReplies) && tweet.preparedReplies.length) return { replies: tweet.preparedReplies };
+    enqueueAiPrefetch(job, index);
+    const prefetched = await waitForAiPrefetch(job, index);
+    if (prefetched.status === "ready") return { replies: prefetched.replies };
+    if (prefetched.status === "stopped") return null;
+    if (prefetched.status === "missing") {
+      showJobBar("后台预生成队列未就绪，正在直接请求 AI…");
+      return sendAi(tweet, 1, job);
+    }
+    const error = prefetched.error || { code: "timeout", detail: "AI prefetch timeout" };
+    toast(`AI 预生成失败：${localizeError(error)}`, true);
+    return null;
+  }
+
+  function clearAiPrefetch(runId) {
+    if (!runId) return;
+    try { chrome.runtime.sendMessage({ type: "AI_PREFETCH_CLEAR", runId }).catch(() => {}); } catch {}
+  }
+
+  async function sendAi(tweet, suggestionCountOverride, configOverride) {
     try {
       const suggestionCount = Number.isFinite(Number(suggestionCountOverride)) ? Number(suggestionCountOverride) : state.settings.suggestionCount;
-      const response = await chrome.runtime.sendMessage({ type: "AI_REQUEST", payload: { replyMode: state.settings.replyMode, customPrompt: state.settings.customPrompt, maxChars: state.settings.maxChars, suggestionCount, tweet: { author: tweet.author, text: tweet.text, likes: tweet.likes, views: tweet.views, ageHours: Math.round(tweet.ageHours), url: tweet.url } } });
+      const response = await chrome.runtime.sendMessage({ type: "AI_REQUEST", payload: { replyMode: configOverride?.replyMode || state.settings.replyMode, customPrompt: configOverride?.customPrompt ?? state.settings.customPrompt, maxChars: configOverride?.maxChars || state.settings.maxChars, suggestionCount, tweet: { author: tweet.author, text: tweet.text, likes: tweet.likes, views: tweet.views, ageHours: Math.round(tweet.ageHours), url: tweet.url } } });
       if (!response?.ok) { const failure = response?.error || { code: "providerError", detail: "Unknown error" }; throw Object.assign(new Error(failure.detail || failure.message || "Unknown error"), failure); } return response.data;
     } catch (error) { toast(localizeError(error), true); switchTab("settings"); return null; }
   }

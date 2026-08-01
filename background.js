@@ -2,6 +2,16 @@ const DEFAULTS = {
   apiBase: "https://api.openai.com/v1",
   model: "gpt-4.1-mini"
 };
+const AI_PREFETCH_CACHE_KEY = "xrcAiReplyPrefetch";
+const AI_PREFETCH_CONCURRENCY = 2;
+const AI_PREFETCH_TTL_MS = 6 * 60 * 60 * 1000;
+const aiPrefetchInFlight = new Map();
+const aiPrefetchScheduled = new Map();
+const aiPrefetchControllers = new Map();
+const cancelledPrefetchRuns = new Set();
+let aiPrefetchQueue = [];
+let aiPrefetchActiveCount = 0;
+let aiPrefetchCacheWriteQueue = Promise.resolve();
 
 function makeError(code, detail = "") {
   const error = new Error(JSON.stringify({ code, detail: String(detail || "") }));
@@ -31,6 +41,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     registerActiveJob(sender.tab?.id, message.storageKey, message.accountId)
       .then(() => sendResponse({ ok: true, now: Date.now() }))
       .catch((error) => sendResponse({ ok: false, error: serializeError(error) }));
+    return true;
+  }
+  if (message?.type === "AI_PREFETCH_JOB") {
+    handleAiPrefetchJob(message.payload).then(sendResponse).catch((error) => {
+      sendResponse({ ok: false, error: serializeError(error) });
+    });
+    return true;
+  }
+  if (message?.type === "AI_PREFETCH_CLEAR") {
+    clearAiPrefetchRun(message.runId).then(() => sendResponse({ ok: true })).catch((error) => {
+      sendResponse({ ok: false, error: serializeError(error) });
+    });
     return true;
   }
   if (!["AI_REQUEST", "POST_AI_REQUEST"].includes(message?.type)) return false;
@@ -130,7 +152,7 @@ async function handlePostAiRequest({ prompt, maxChars }) {
   }
 }
 
-async function handleAiRequest({ tweet, replyMode, customPrompt, maxChars, suggestionCount }) {
+async function handleAiRequest({ tweet, replyMode, customPrompt, maxChars, suggestionCount }, externalSignal) {
   const settings = await chrome.storage.local.get(["apiKey", "apiBase", "model"]);
   const apiKey = String(settings.apiKey || "").trim();
   if (!apiKey) throw makeError("missingApiKey");
@@ -140,6 +162,9 @@ async function handleAiRequest({ tweet, replyMode, customPrompt, maxChars, sugge
   const prompt = replyPrompt(tweet, replyMode, customPrompt, maxChars, suggestionCount);
 
   const controller = new AbortController();
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal?.aborted) controller.abort();
+  else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
   const timeout = setTimeout(() => controller.abort(), 45000);
   let response;
   try {
@@ -162,6 +187,7 @@ async function handleAiRequest({ tweet, replyMode, customPrompt, maxChars, sugge
     throw makeError("network", error?.message || String(error));
   } finally {
     clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", abortFromExternal);
   }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw makeError("providerError", body?.error?.message || `HTTP ${response.status}`);
@@ -178,6 +204,203 @@ async function handleAiRequest({ tweet, replyMode, customPrompt, maxChars, sugge
   } catch {
     throw makeError("invalidJson");
   }
+}
+
+async function handleAiPrefetchJob(payload) {
+  const runId = String(payload?.runId || "");
+  const entries = Array.isArray(payload?.entries) ? payload.entries.slice(0, 3) : [];
+  if (!runId || !entries.length) return { ok: false, error: { code: "invalidPrefetch", detail: "Missing runId or entries" } };
+  const stored = await chrome.storage.local.get("autoJob");
+  const job = stored.autoJob;
+  if (!job?.active || job.paused || job._runId !== runId || job.replySource !== "ai") {
+    return { ok: false, stale: true };
+  }
+  if (cancelledPrefetchRuns.has(runId)) return { ok: false, stale: true };
+  const validEntries = entries.filter((entry) => {
+    const index = Number(entry?.index);
+    const item = job.items?.[index];
+    return Number.isInteger(index) && index >= job.current && item?.url && item.url === entry?.tweet?.url;
+  });
+  const config = {
+    replyMode: job.replyMode || payload.replyMode,
+    customPrompt: job.customPrompt ?? payload.customPrompt,
+    maxChars: job.maxChars || payload.maxChars
+  };
+  const tasks = validEntries.map((entry) => scheduleAiPrefetch(runId, entry, config));
+  await Promise.all(tasks);
+  return { ok: true, completed: tasks.length };
+}
+
+async function scheduleAiPrefetch(runId, entry, config) {
+  const index = Number(entry.index);
+  const key = `${runId}:${index}`;
+  if (aiPrefetchInFlight.has(key)) return aiPrefetchInFlight.get(key);
+  if (aiPrefetchScheduled.has(key)) return aiPrefetchScheduled.get(key).promise;
+
+  let resolveTask;
+  const promise = new Promise((resolve) => { resolveTask = resolve; });
+  const queued = { key, runId, entry, config, promise, resolve: resolveTask, cancelled: false, startedAt: Date.now() };
+  aiPrefetchScheduled.set(key, queued);
+
+  try {
+    const cached = await readAiPrefetchRecord(key);
+    if (cached?.status === "ready" && cached.url === entry.tweet.url && Array.isArray(cached.replies) && cached.replies.length) {
+      aiPrefetchScheduled.delete(key);
+      queued.resolve(cached);
+      return promise;
+    }
+    if (queued.cancelled || cancelledPrefetchRuns.has(runId)) {
+      aiPrefetchScheduled.delete(key);
+      queued.resolve(null);
+      return promise;
+    }
+    queued.startedAt = cached?.startedAt || Date.now();
+    await writeAiPrefetchRecord(key, {
+      status: "queued", runId, index, url: entry.tweet.url,
+      startedAt: queued.startedAt, updatedAt: Date.now()
+    });
+    if (queued.cancelled || cancelledPrefetchRuns.has(runId)) {
+      aiPrefetchScheduled.delete(key);
+      await writeAiPrefetchRecord(key, null);
+      queued.resolve(null);
+      return promise;
+    }
+    aiPrefetchQueue.push(queued);
+    pumpAiPrefetchQueue();
+  } catch (error) {
+    aiPrefetchScheduled.delete(key);
+    if (!cancelledPrefetchRuns.has(runId)) {
+      const record = {
+        status: "error", runId, index, url: entry.tweet.url,
+        error: serializeError(error), startedAt: queued.startedAt, updatedAt: Date.now()
+      };
+      await writeAiPrefetchRecord(key, record).catch(() => {});
+      queued.resolve(record);
+    } else {
+      queued.resolve(null);
+    }
+  }
+  return promise;
+}
+
+function pumpAiPrefetchQueue() {
+  while (aiPrefetchActiveCount < AI_PREFETCH_CONCURRENCY && aiPrefetchQueue.length) {
+    const queued = aiPrefetchQueue.shift();
+    if (queued.cancelled || cancelledPrefetchRuns.has(queued.runId)) {
+      aiPrefetchScheduled.delete(queued.key);
+      queued.resolve(null);
+      continue;
+    }
+    aiPrefetchActiveCount += 1;
+    const controller = new AbortController();
+    aiPrefetchControllers.set(queued.key, { runId: queued.runId, controller });
+    const task = prefetchAiReply(queued.runId, queued.entry, queued.config, queued.startedAt, controller.signal)
+      .finally(() => {
+        aiPrefetchInFlight.delete(queued.key);
+        aiPrefetchControllers.delete(queued.key);
+        aiPrefetchActiveCount -= 1;
+        pumpAiPrefetchQueue();
+      });
+    aiPrefetchInFlight.set(queued.key, task);
+    aiPrefetchScheduled.delete(queued.key);
+    task.then(queued.resolve, () => queued.resolve(null));
+  }
+}
+
+async function prefetchAiReply(runId, entry, config, startedAt, signal) {
+  const index = Number(entry.index);
+  const key = `${runId}:${index}`;
+  const cached = await readAiPrefetchRecord(key);
+  if (cached?.status === "ready" && cached.url === entry.tweet.url && Array.isArray(cached.replies) && cached.replies.length) return cached;
+  try {
+    if (cancelledPrefetchRuns.has(runId)) return null;
+    await writeAiPrefetchRecord(key, {
+      status: "pending", runId, index, url: entry.tweet.url,
+      startedAt: startedAt || cached?.startedAt || Date.now(), updatedAt: Date.now()
+    });
+    const response = await handleAiRequest({
+      tweet: entry.tweet,
+      replyMode: config.replyMode,
+      customPrompt: config.customPrompt,
+      maxChars: config.maxChars,
+      suggestionCount: 1
+    }, signal);
+    if (cancelledPrefetchRuns.has(runId)) return null;
+    const replies = Array.isArray(response?.data?.replies) ? response.data.replies.filter((reply) => String(reply || "").trim()) : [];
+    if (!replies.length) throw makeError("emptyResponse", "Prefetch returned no replies");
+    const record = {
+      status: "ready", runId, index, url: entry.tweet.url,
+      replies, startedAt: startedAt || cached?.startedAt || Date.now(), updatedAt: Date.now()
+    };
+    await writeAiPrefetchRecord(key, record);
+    return record;
+  } catch (error) {
+    if (cancelledPrefetchRuns.has(runId)) return null;
+    const record = {
+      status: "error", runId, index, url: entry.tweet.url,
+      error: serializeError(error), startedAt: startedAt || cached?.startedAt || Date.now(), updatedAt: Date.now()
+    };
+    await writeAiPrefetchRecord(key, record);
+    return record;
+  }
+}
+
+async function readAiPrefetchRecord(key) {
+  const stored = await chrome.storage.local.get(AI_PREFETCH_CACHE_KEY);
+  return stored[AI_PREFETCH_CACHE_KEY]?.entries?.[key] || null;
+}
+
+function writeAiPrefetchRecord(key, record) {
+  const operation = aiPrefetchCacheWriteQueue.then(async () => {
+    const stored = await chrome.storage.local.get(AI_PREFETCH_CACHE_KEY);
+    const cache = stored[AI_PREFETCH_CACHE_KEY] && typeof stored[AI_PREFETCH_CACHE_KEY] === "object"
+      ? stored[AI_PREFETCH_CACHE_KEY]
+      : { entries: {} };
+    const entries = cache.entries && typeof cache.entries === "object" ? cache.entries : {};
+    const cutoff = Date.now() - AI_PREFETCH_TTL_MS;
+    for (const [entryKey, value] of Object.entries(entries)) {
+      if (Number(value?.updatedAt || 0) < cutoff) delete entries[entryKey];
+    }
+    if (record && !cancelledPrefetchRuns.has(record.runId)) entries[key] = record;
+    else delete entries[key];
+    await chrome.storage.local.set({ [AI_PREFETCH_CACHE_KEY]: { entries } });
+    return record;
+  });
+  aiPrefetchCacheWriteQueue = operation.catch(() => {});
+  return operation;
+}
+
+async function clearAiPrefetchRun(runIdValue) {
+  const runId = String(runIdValue || "");
+  if (!runId) return;
+  cancelledPrefetchRuns.add(runId);
+  for (const queued of aiPrefetchScheduled.values()) {
+    if (queued.runId !== runId) continue;
+    queued.cancelled = true;
+    queued.resolve(null);
+    aiPrefetchScheduled.delete(queued.key);
+  }
+  aiPrefetchQueue = aiPrefetchQueue.filter((queued) => {
+    if (queued.runId !== runId) return true;
+    queued.cancelled = true;
+    queued.resolve(null);
+    return false;
+  });
+  for (const active of aiPrefetchControllers.values()) {
+    if (active.runId === runId) active.controller.abort();
+  }
+  const operation = aiPrefetchCacheWriteQueue.then(async () => {
+    const stored = await chrome.storage.local.get(AI_PREFETCH_CACHE_KEY);
+    const cache = stored[AI_PREFETCH_CACHE_KEY];
+    if (!cache?.entries) return;
+    const entries = { ...cache.entries };
+    for (const key of Object.keys(entries)) {
+      if (key.startsWith(`${runId}:`)) delete entries[key];
+    }
+    await chrome.storage.local.set({ [AI_PREFETCH_CACHE_KEY]: { entries } });
+  });
+  aiPrefetchCacheWriteQueue = operation.catch(() => {});
+  await operation;
 }
 
 function tweetContext(tweet) {
