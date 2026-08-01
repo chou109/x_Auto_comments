@@ -150,7 +150,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.4</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.12</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -1522,7 +1522,7 @@
     }
     editor = editor?.isConnected ? editor : await waitForReplyEditor(2000);
     const beforeText = readEditorText(editor);
-    if (beforeText) {
+    if (beforeText || composerSendButtonEnabled(editor)) {
       toast("回复框原有内容无法清空，已跳过以避免重复", true);
       return false;
     }
@@ -1537,9 +1537,13 @@
       toast(`已成功填入并启用回复按钮（${[...sendText].length}/${state.settings.maxChars} 字符）`);
       return { ok: true, text: sendText, editor: activeEditor };
     }
-    const observedLength = [...String(fillResult.actualText || "")].length;
+    const diagnostics = readEditorTextDetails(activeEditor);
+    const observedLength = [...String(fillResult.actualText || diagnostics.text || "")].length;
     const expectedLength = [...sendText].length;
-    const failureReason = `回复框填入失败（检测到 ${observedLength}/${expectedLength} 个可见字符）`;
+    const rawLength = [...diagnostics.rawText].length;
+    const leafLength = [...diagnostics.leafText].length;
+    const diagnostic = rawLength !== observedLength || leafLength !== observedLength ? `；文本层 ${leafLength}，DOM 原始 ${rawLength}` : "";
+    const failureReason = `回复框填入失败（检测到 ${observedLength}/${expectedLength} 个可见字符${diagnostic}）`;
     await clearReplyEditor();
     toast(`${failureReason}，已清空并准备重试`, true);
     return { ok: false, reason: failureReason };
@@ -1638,6 +1642,7 @@
         return advanceSkippedJob(job, "恢复任务时检测到当前帖子已经发送成功");
       }
       if (!runningJobs["autoJob"]) return;
+      showJobBar(job.replySource === "specified" || tweet.preparedReplies?.length ? "正在准备回复内容…" : "正在请求 AI 生成回复（最长等待 45 秒）…");
       const result = job.replySource === "specified" ? { replies: job.specifiedReplies } : (tweet.preparedReplies?.length ? { replies: tweet.preparedReplies } : await sendAi(tweet, 1));
       if (!runningJobs["autoJob"]) return;
       const replyPool = Array.isArray(result?.replies) ? result.replies : [];
@@ -1662,6 +1667,7 @@
         if (!runningJobs["autoJob"]) return;
         await chrome.storage.local.set({ autoJob: job });
       }
+      showJobBar(`正在将第 ${job.sent + 1}/${target} 条内容写入回复框…`);
       const filled = await fillReply(0, replyIndex);
       if (filled === "restricted") return advanceSkippedJob(job, "该帖子仅允许部分账号回复");
       if (!filled?.ok) return retryCurrentStep(job, tweet, "fillRetries", filled?.reason || "回复框填入失败", 2);
@@ -1699,7 +1705,7 @@
       if (!button || !scopeContainsElement(activeEditor, button)) { runningJobs["autoJob"] = null; return retryCurrentStep(job, tweet, "buttonRetries", "发送按钮不在当前回复框中", 1); }
       button.click();
       showJobBar(`正在确认第 ${job.sent + 1}/${target} 条是否发送成功…`);
-      const submission = await waitForReplySubmission(30000, expectedText);
+      const submission = await waitForReplySubmission(30000, expectedText, false);
       if (!runningJobs["autoJob"]) return;
       if (submission === "duplicate") return advanceSkippedJob(job, "X 提示这条回复已经发送过");
       if (submission !== "sent") {
@@ -2002,9 +2008,7 @@
       const enabled = buttons.find((b) => b.getAttribute("aria-disabled") !== "true" && !b.disabled);
       if (enabled) return enabled;
     }
-    // Fall back to the original priority-ranked search.  In auto-reply the
-    // editor was just filled; the top-ranked enabled button is the right one.
-    return findSendButton(editor);
+    return null;
   }
   function findComposerFileInput(editor) {
     if (!editor?.isConnected) return null;
@@ -2023,10 +2027,9 @@
   }
   function scopeContainsElement(editor, child) {
     if (!editor?.isConnected || !child?.isConnected) return false;
-    // In auto-reply the editor was just filled by us; any enabled visible
-    // send button is acceptable — the priority-ranked findSendButton already
-    // picked the best one.
-    return true;
+    const composer = findComposerContainer(editor);
+    const dialog = editor.closest('[role="dialog"]');
+    return Boolean((composer && composer.contains(child)) || (dialog && dialog.contains(child)));
   }
   function findComposerMediaPreview(editor) {
     if (!editor?.isConnected) return null;
@@ -2361,14 +2364,14 @@
       activeEditor = restored.editor;
       if (!restored.complete) return retryPostStep(job, "图片载入后发帖文字丢失", 2, activeEditor);
     }
-    const sendButton = await waitForEnabledSendButton(20000, activeEditor);
-    if (!sendButton || sendButton.getAttribute("aria-disabled") === "true") return retryPostStep(job, "发布按钮不可用", 2, activeEditor);
+    const sendButton = await waitForStrictSendButton(20000, activeEditor);
+    if (!sendButton || !scopeContainsElement(activeEditor, sendButton)) return retryPostStep(job, "发布按钮不在当前发帖框中", 2, activeEditor);
     const resumed = await waitUntilPostResumed();
     if (!resumed) return;
     if (!await waitForSendWindow("post", job, "postJob")) return;
     sendButton.click();
     showPostJobBar(`正在确认第 ${job.sent + 1}/${job.target} 条帖子…`);
-    const submission = await waitForReplySubmission(30000, text);
+    const submission = await waitForReplySubmission(30000, text, false);
     if (submission === "duplicate") {
       await clearPostComposer();
       job.skipped = (job.skipped || 0) + 1;
@@ -2721,40 +2724,65 @@
   async function clearPostComposer(targetEditor = findReplyEditor()) {
     let editor = targetEditor?.isConnected ? targetEditor : findReplyEditor();
     if (!editor) return true;
-    let composer = findComposerContainer(editor);
+    const originalComposer = findComposerContainer(editor);
+    let composer = originalComposer;
+    const resolveEditor = () => {
+      if (editor?.isConnected && (!originalComposer?.isConnected || originalComposer.contains(editor))) return editor;
+      if (originalComposer?.isConnected) return findEditorInComposer(originalComposer);
+      return findReplyEditor();
+    };
     const initialText = readEditorText(editor);
-    const initialMedia = composer?.querySelector('[data-testid="attachments"], [data-testid="removeMedia"], [data-testid="mediaPreview"], img[src^="blob:"]');
+    const initialMedia = findComposerMediaPreview(editor);
+    const initialDirty = composerSendButtonEnabled(editor);
     // Do not send a synthetic deletion into an already-empty X editor. Some
     // Lexical builds leave the selection unusable after that no-op event.
-    if (!initialText && !initialMedia) return true;
-    (composer || document).querySelectorAll('[data-testid="removeMedia"]').forEach((button) => { if (isVisibleElement(button)) button.click(); });
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      editor = editor?.isConnected ? editor : findReplyEditor();
-      if (!editor) return true;
-      editor.focus();
-      selectEditorContents(editor);
-      const deleted = document.execCommand("delete", false);
-      if (!deleted) document.execCommand("insertText", false, "");
-      try {
-        editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null }));
-      } catch {
-        editor.dispatchEvent(new Event("input", { bubbles: true }));
+    if (!initialText && !initialMedia && !initialDirty) return true;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      editor = resolveEditor();
+      if (!editor) return !originalComposer?.isConnected;
+      composer = findComposerContainer(editor);
+      clickComposerRemoveButtons(composer);
+      if (readEditorText(editor)) {
+        editor.focus();
+        selectEditorContents(editor);
+        const deleted = document.execCommand("delete", false);
+        if (!deleted) document.execCommand("insertText", false, "");
       }
-      editor.dispatchEvent(new Event("change", { bubbles: true }));
-      await delay(350);
+      await delay(450);
+      editor = resolveEditor();
+      if (!editor) return !originalComposer?.isConnected;
       composer = findComposerContainer(editor);
       const text = readEditorText(editor);
-      const media = composer?.querySelector('[data-testid="attachments"], [data-testid="removeMedia"], [data-testid="mediaPreview"], img[src^="blob:"]');
-      if (!text && !media) return true;
-      if (attempt === 1 && text) {
-        // Last-resort synchronization for X editor builds where execCommand
-        // reports success but leaves the React-managed text nodes in place.
-        editor.replaceChildren();
-        editor.dispatchEvent(new Event("input", { bubbles: true }));
-        await delay(350);
-      }
+      const media = findComposerMediaPreview(editor);
+      const dirty = composerSendButtonEnabled(editor);
+      if (!text && !media && !dirty) return true;
     }
     return false;
+  }
+
+  function clickComposerRemoveButtons(scope) {
+    if (!scope?.isConnected) return 0;
+    const candidates = [...scope.querySelectorAll(
+      '[data-testid="removeMedia"], [data-testid="attachments"] button, [data-testid="attachments"] [role="button"], [data-testid="mediaPreview"] button, [data-testid="mediaPreview"] [role="button"]'
+    )]
+      .filter(isVisibleElement)
+      .filter((button) => !button.closest("#xrc-root"))
+      .filter((button) => {
+        if (button.matches('[data-testid="removeMedia"]')) return true;
+        const aria = String(button.getAttribute("aria-label") || "").trim();
+        const text = String(button.innerText || button.textContent || "").trim();
+        if (/(?:remove|delete|移除|删除).*(?:media|photo|image|attachment|媒体|图片|照片)|(?:media|photo|image|attachment|媒体|图片|照片).*(?:remove|delete|移除|删除)/i.test(aria)) return true;
+        return /^(?:×|x)$/i.test(text) || /^(?:close|关闭)$/i.test(aria);
+      });
+    for (const button of candidates) {
+      try { button.click(); } catch {}
+    }
+    return candidates.length;
+  }
+
+  function composerSendButtonEnabled(editor) {
+    const button = findSendButtonStrict(editor);
+    return Boolean(button && button.getAttribute("aria-disabled") !== "true" && !button.disabled);
   }
   async function maybeAttachPostImage(job, targetEditor = findReplyEditor()) {
     // 委托到统一图片附加函数（发帖图片库）
@@ -3029,43 +3057,36 @@
     if (!editor) return null;
     const sendSelector = '[data-testid="tweetButton"], [data-testid="tweetButtonInline"]';
     let node = editor;
-    for (let depth = 0; node && node !== document.body && depth < 12; depth += 1, node = node.parentElement) {
-      if (node.querySelector?.(sendSelector)) return node;
+    while (node && node !== document.body) {
+      if ([...(node.querySelectorAll?.(sendSelector) || [])].some(isVisibleElement)) return node;
+      node = node.parentElement;
     }
     return editor.closest('[role="dialog"]') || editor.parentElement;
   }
+  function findEditorInComposer(composer) {
+    if (!composer?.isConnected) return null;
+    const selector = '[data-testid="tweetTextarea_0"][contenteditable="true"], [data-testid="tweetTextarea_0"] [contenteditable="true"], [contenteditable="true"]';
+    const editors = [...composer.querySelectorAll(selector)].filter(isVisibleElement);
+    return editors.sort((a, b) => elementPriority(b) - elementPriority(a))[0] || null;
+  }
   async function waitForReplyEditor(timeoutMs) { const deadline = Date.now() + timeoutMs; while (Date.now() < deadline) { const editor = findReplyEditor(); if (editor && editor.isConnected) return editor; await delay(250); } return null; }
   async function waitForTweetPage(tweet, timeoutMs) { const deadline = Date.now() + timeoutMs; const statusId = new URL(tweet.url).pathname.split("/").filter(Boolean).pop(); while (Date.now() < deadline) { if (findReplyEditor()) return true; const article = [...document.querySelectorAll('article[data-testid="tweet"]')].find((item) => item.querySelector(`a[href*="/status/${statusId}"]`)); if (article) return true; await delay(500); } return false; }
-  async function clearReplyEditor() {
-    const editor = findReplyEditor();
+  async function clearReplyEditor(targetEditor = findReplyEditor()) {
+    const editor = targetEditor?.isConnected ? targetEditor : findReplyEditor();
+    if (!editor) return true;
     const composer = findComposerContainer(editor);
-    // 先移除媒体附件
-    (composer || document).querySelectorAll('[data-testid="removeMedia"]').forEach((button) => { if (isVisibleElement(button)) button.click(); });
-    if (editor) {
-      const text = readEditorText(editor);
-      editor.focus();
-      if (text) {
-        selectEditorContents(editor);
-        document.execCommand("insertText", false, "");
+    if (!await clearPostComposer(editor)) return false;
+    const dialog = editor.closest('[role="dialog"]');
+    if (dialog?.isConnected) {
+      const closeBtn = dialog.querySelector('[data-testid="app-bar-close"], [aria-label="Close"], [aria-label="关闭"]');
+      if (closeBtn && isVisibleElement(closeBtn)) {
+        closeBtn.click();
+        await delay(350);
       }
-      try { editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null })); } catch { editor.dispatchEvent(new Event("input", { bubbles: true })); }
-      editor.dispatchEvent(new Event("change", { bubbles: true }));
-      // 尝试点击 X 关闭按钮关闭编辑器
-      const closeBtn = (composer || editor.closest('[role="dialog"]') || document).querySelector('[data-testid="app-bar-close"], [aria-label="Close"], [aria-label="关闭"]');
-      if (closeBtn && isVisibleElement(closeBtn)) { closeBtn.click(); await delay(200); }
-      editor.blur();
     }
-    // 发送 Escape 关闭弹窗
-    const escapeTarget = editor || document.body;
-    escapeTarget.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
-    escapeTarget.dispatchEvent(new KeyboardEvent("keyup", { key: "Escape", code: "Escape", bubbles: true }));
-    document.activeElement?.blur?.();
-    await delay(800);
-    const active = findReplyEditor();
-    const remainingText = readEditorText(active);
-    const remainingComposer = findComposerContainer(active);
-    const remainingMedia = [...(remainingComposer || document).querySelectorAll('[data-testid="removeMedia"]')].some(isVisibleElement);
-    return !remainingText && !remainingMedia;
+    const active = composer?.isConnected ? findEditorInComposer(composer) : null;
+    if (!active) return true;
+    return !readEditorText(active) && !findComposerMediaPreview(active) && !composerSendButtonEnabled(active);
   }
 
   // 查找编辑器附近的图片/媒体上传按钮
@@ -3084,13 +3105,29 @@
   function isVisibleElement(element) { if (!element?.isConnected || element.closest('[aria-hidden="true"]')) return false; const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden"; }
   function elementPriority(element) { const rect = element.getBoundingClientRect(); return (element.closest('[role="dialog"]') ? 100000 : 0) + Math.max(0, rect.bottom); }
   function selectEditorContents(editor) { const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents(editor); selection.removeAllRanges(); selection.addRange(range); }
+  function placeEditorCaretAtEnd(editor) { const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents(editor); range.collapse(false); selection.removeAllRanges(); selection.addRange(range); }
   function readEditorText(editor) {
-    return String(editor?.innerText || editor?.textContent || "")
+    return readEditorTextDetails(editor).text;
+  }
+  function readEditorTextDetails(editor) {
+    if (!editor) return { text: "", leafText: "", rawText: "", leafCount: 0 };
+    const leafSelector = '[data-text="true"], [data-lexical-text="true"]';
+    const leaves = [...editor.querySelectorAll(leafSelector)]
+      // Some X builds nest two text markers around the same characters. Keep
+      // only the innermost marker so one rendered run is counted once.
+      .filter((node) => !node.querySelector(leafSelector))
+      .filter(isVisibleElement);
+    const leafText = cleanEditorText(leaves.map((node) => node.textContent || "").join(""));
+    const rawText = cleanEditorText(editor.innerText || editor.textContent || "");
+    return { text: leafText || rawText, leafText, rawText, leafCount: leaves.length };
+  }
+  function cleanEditorText(value) {
+    return String(value || "")
       .replace(/[\u200B-\u200D\u2060\uFEFF\uFFFC]/g, "")
       .trim();
   }
   function editorTextMatches(actual, expected) {
-    const clean = (value) => normalizeComparable(value).normalize("NFKC").replace(/[\u200B-\u200D\u2060\uFEFF\uFFFC]/g, "");
+    const clean = (value) => normalizeComparable(cleanEditorText(value)).normalize("NFKC").replace(/[\u200B-\u200D\u2060\uFEFF\uFFFC]/g, "");
     const actualClean = clean(actual);
     const expectedClean = clean(expected);
     if (!expectedClean || !actualClean) return false;
@@ -3103,85 +3140,33 @@
   async function replaceEditorText(editor, text) {
     let activeEditor = editor?.isConnected ? editor : findReplyEditor();
     if (!activeEditor) return { editor: null, text: "", complete: false };
-    const strategies = [
-      {
-        name: "insertText",
-        run: () => { document.execCommand("insertText", false, text); }
-      },
-      {
-        name: "insertHTML",
-        run: () => { document.execCommand("insertHTML", false, escapeHtml(text)); }
-      },
-      {
-        name: "dom-fallback",
-        run: () => {
-          activeEditor.focus();
-          activeEditor.replaceChildren(document.createTextNode(text));
-          try {
-            activeEditor.dispatchEvent(new InputEvent("beforeinput", {
-              bubbles: true, cancelable: false, composed: true,
-              inputType: "insertText", data: text
-            }));
-          } catch {}
-          activeEditor.dispatchEvent(new InputEvent("input", {
-            bubbles: true, cancelable: false, composed: true,
-            inputType: "insertText", data: text
-          }));
-          activeEditor.dispatchEvent(new Event("change", { bubbles: true }));
-          // Last-ditch: execCommand insertText AFTER replaceChildren to
-          // push text into X's Lexical state before the DOM is reconciled.
-          try { document.execCommand("insertText", false, text); } catch {}
-        }
-      }
-    ];
+    const composer = findComposerContainer(activeEditor);
     let actualText = "";
-    for (let index = 0; index < strategies.length; index += 1) {
-      activeEditor = activeEditor?.isConnected ? activeEditor : findReplyEditor();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      activeEditor = activeEditor?.isConnected ? activeEditor : (findEditorInComposer(composer) || findReplyEditor());
       if (!activeEditor) break;
-      // For insertText, retry once if first attempt doesn't stick.
-      const maxAttempts = index === 0 ? 2 : 1;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        activeEditor.focus();
-        selectEditorContents(activeEditor);
-        try {
-          const fn = strategies[index].run;
-          await fn();
-        } catch { continue; }
-        await delay(250);
-        activeEditor = activeEditor?.isConnected ? activeEditor : findReplyEditor();
+      actualText = readEditorText(activeEditor);
+      // A non-empty mismatch must never be retried: another insertion could
+      // append a second copy. The second attempt is allowed only after the
+      // first one left the editor visibly and internally empty.
+      if (actualText) break;
+      activeEditor.focus();
+      placeEditorCaretAtEnd(activeEditor);
+      try { document.execCommand("insertText", false, text); } catch {}
+      const deadline = Date.now() + 1200;
+      while (Date.now() < deadline) {
+        await delay(100);
+        activeEditor = activeEditor?.isConnected ? activeEditor : (findEditorInComposer(composer) || findReplyEditor());
+        if (!activeEditor) break;
         actualText = readEditorText(activeEditor);
         if (editorTextMatches(actualText, text)) {
-          return { editor: activeEditor, text, actualText, complete: true, method: strategies[index].name };
+          return { editor: activeEditor, text, actualText, complete: true, method: `insertText-${attempt + 1}` };
         }
-        if (attempt < maxAttempts - 1) await delay(200);
+        if (actualText) break;
       }
-      if (actualText && index < strategies.length - 1) {
-        selectEditorContents(activeEditor);
-        document.execCommand("delete", false);
-        await delay(80);
-      }
+      if (actualText) break;
     }
     return { editor: activeEditor, text, actualText, complete: false, method: "none" };
-  }
-  async function clearEditorTextForRetry(editor) {
-    const activeEditor = editor?.isConnected ? editor : findReplyEditor();
-    if (!activeEditor) return false;
-    activeEditor.focus();
-    selectEditorContents(activeEditor);
-    document.execCommand("delete", false);
-    await delay(120);
-    if (readEditorText(activeEditor)) {
-      activeEditor.replaceChildren();
-      try {
-        activeEditor.dispatchEvent(new InputEvent("input", {
-          bubbles: true, composed: true, inputType: "deleteContentBackward", data: null
-        }));
-      } catch {
-        activeEditor.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-      }
-      await delay(120);
-    }
-    return !readEditorText(activeEditor);
   }
   function fitReply(value, limit) { const text = String(value || "").trim(); const max = Math.max(20, Math.min(280, Number(limit) || 280)); if ([...text].length <= max) return text; return [...text].slice(0, Math.max(1, max - 1)).join("").replace(/[\s,;:.-]+$/, "") + "…"; }
   function formatSearchTerm(term) { return /\s/.test(term) ? `"${term.replace(/"/g, "")}\"` : term; }
