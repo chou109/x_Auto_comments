@@ -150,7 +150,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.12</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.13</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -1543,7 +1543,8 @@
     const rawLength = [...diagnostics.rawText].length;
     const leafLength = [...diagnostics.leafText].length;
     const diagnostic = rawLength !== observedLength || leafLength !== observedLength ? `；文本层 ${leafLength}，DOM 原始 ${rawLength}` : "";
-    const failureReason = `回复框填入失败（检测到 ${observedLength}/${expectedLength} 个可见字符${diagnostic}）`;
+    const inputError = fillResult.error ? `；输入异常：${String(fillResult.error).slice(0, 80)}` : "";
+    const failureReason = `回复框填入失败（检测到 ${observedLength}/${expectedLength} 个可见字符${diagnostic}${inputError}）`;
     await clearReplyEditor();
     toast(`${failureReason}，已清空并准备重试`, true);
     return { ok: false, reason: failureReason };
@@ -1747,6 +1748,16 @@
         await chrome.storage.local.set({ autoJob: job });
       }
       await navigateAutoJob(job, job.items[job.current].url);
+    } catch (error) {
+      console.error("[XRC] 自动回复任务异常", error);
+      const detail = String(error?.message || error || "未知错误").slice(0, 160);
+      try {
+        await pauseAutoJobWithReason(job, `自动任务异常：${detail}；任务已暂停，请刷新页面后继续`);
+      } catch {
+        state.autoRunning = false;
+        showJobBar(`自动任务异常：${detail}`);
+        toast(`自动任务异常：${detail}`, true);
+      }
     } finally {
       runningJobs["autoJob"] = null;
     }
@@ -2743,10 +2754,18 @@
       composer = findComposerContainer(editor);
       clickComposerRemoveButtons(composer);
       if (readEditorText(editor)) {
-        editor.focus();
-        selectEditorContents(editor);
-        const deleted = document.execCommand("delete", false);
-        if (!deleted) document.execCommand("insertText", false, "");
+        try {
+          editor.focus();
+          await delay(50);
+          editor = resolveEditor();
+          if (!editor) continue;
+          selectEditorContents(editor);
+          const deleted = document.execCommand("delete", false);
+          if (!deleted) document.execCommand("insertText", false, "");
+        } catch {
+          await delay(100);
+          continue;
+        }
       }
       await delay(450);
       editor = resolveEditor();
@@ -3104,8 +3123,23 @@
 
   function isVisibleElement(element) { if (!element?.isConnected || element.closest('[aria-hidden="true"]')) return false; const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden"; }
   function elementPriority(element) { const rect = element.getBoundingClientRect(); return (element.closest('[role="dialog"]') ? 100000 : 0) + Math.max(0, rect.bottom); }
-  function selectEditorContents(editor) { const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents(editor); selection.removeAllRanges(); selection.addRange(range); }
-  function placeEditorCaretAtEnd(editor) { const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents(editor); range.collapse(false); selection.removeAllRanges(); selection.addRange(range); }
+  function selectEditorContents(editor) { const selection = window.getSelection(); if (!selection || !editor?.isConnected) throw new Error("回复框已被 X 重建"); const range = document.createRange(); range.selectNodeContents(editor); selection.removeAllRanges(); selection.addRange(range); }
+  function placeEditorCaretAtEnd(editor) {
+    const selection = window.getSelection();
+    if (!selection || !editor?.isConnected) throw new Error("回复框已被 X 重建");
+    const offsetSelector = '[data-offset-key]';
+    const offsetLeaves = [...editor.querySelectorAll(offsetSelector)]
+      .filter((node) => !node.querySelector(offsetSelector))
+      .filter(isVisibleElement);
+    const block = offsetLeaves.at(-1) || editor.querySelector('[data-contents="true"] > :last-child') || editor;
+    const range = document.createRange();
+    const placeholderBreak = block.querySelector?.('br[data-text="true"], br');
+    if (placeholderBreak?.parentNode) range.setStartBefore(placeholderBreak);
+    else { range.selectNodeContents(block); range.collapse(false); }
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
   function readEditorText(editor) {
     return readEditorTextDetails(editor).text;
   }
@@ -3142,6 +3176,7 @@
     if (!activeEditor) return { editor: null, text: "", complete: false };
     const composer = findComposerContainer(activeEditor);
     let actualText = "";
+    let lastError = "";
     for (let attempt = 0; attempt < 2; attempt += 1) {
       activeEditor = activeEditor?.isConnected ? activeEditor : (findEditorInComposer(composer) || findReplyEditor());
       if (!activeEditor) break;
@@ -3150,9 +3185,21 @@
       // append a second copy. The second attempt is allowed only after the
       // first one left the editor visibly and internally empty.
       if (actualText) break;
-      activeEditor.focus();
-      placeEditorCaretAtEnd(activeEditor);
-      try { document.execCommand("insertText", false, text); } catch {}
+      try {
+        activeEditor.focus();
+        // X may replace the contenteditable node synchronously on focus,
+        // especially in the modal reply composer. Reacquire it before setting
+        // the selection so the range never targets a detached node.
+        await delay(50);
+        activeEditor = activeEditor?.isConnected ? activeEditor : (findEditorInComposer(composer) || findReplyEditor());
+        if (!activeEditor) throw new Error("聚焦后未找到回复框");
+        if (attempt === 0) selectEditorContents(activeEditor);
+        else placeEditorCaretAtEnd(activeEditor);
+        document.execCommand("insertText", false, text);
+      } catch (error) {
+        lastError = String(error?.message || error || "输入失败");
+        continue;
+      }
       const deadline = Date.now() + 1200;
       while (Date.now() < deadline) {
         await delay(100);
@@ -3166,7 +3213,7 @@
       }
       if (actualText) break;
     }
-    return { editor: activeEditor, text, actualText, complete: false, method: "none" };
+    return { editor: activeEditor, text, actualText, complete: false, method: "none", error: lastError };
   }
   function fitReply(value, limit) { const text = String(value || "").trim(); const max = Math.max(20, Math.min(280, Number(limit) || 280)); if ([...text].length <= max) return text; return [...text].slice(0, Math.max(1, max - 1)).join("").replace(/[\s,;:.-]+$/, "") + "…"; }
   function formatSearchTerm(term) { return /\s/.test(term) ? `"${term.replace(/"/g, "")}\"` : term; }
