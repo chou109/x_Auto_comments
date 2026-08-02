@@ -166,7 +166,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.21</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.22</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -2576,16 +2576,41 @@
     const profileHandle = profileHref.split("/").filter(Boolean)[0]?.toLowerCase();
     if (profileHandle) ownHandles.add(profileHandle);
     if (!ownHandles.size) return false;
-    return [...document.querySelectorAll('article[data-testid="tweet"]')].some((article) => {
-      const href = article.querySelector('time')?.closest('a[href*="/status/"]')?.getAttribute("href") || "";
-      if (!href || normalizeTweetUrl(href) === key) return false;
-      try {
-        const handle = new URL(href, location.origin).pathname.split("/").filter(Boolean)[0]?.toLowerCase();
-        return ownHandles.has(handle);
-      } catch {
-        return false;
+    const matchedArticle = [...document.querySelectorAll('article[data-testid="tweet"]')].some((article) => {
+      if (articleHasTweetKey(article, key)) return false;
+      const articleHandles = new Set();
+      const timeHref = article.querySelector('time')?.closest('a[href*="/status/"]')?.getAttribute("href") || "";
+      const hrefs = [timeHref, ...[...article.querySelectorAll('[data-testid="User-Name"] a[href]')].map((link) => link.getAttribute("href") || "")];
+      for (const href of hrefs) {
+        try {
+          const parts = new URL(href, location.origin).pathname.split("/").filter(Boolean);
+          if (parts.length === 1 && /^[A-Za-z0-9_]{1,15}$/.test(parts[0])) articleHandles.add(parts[0].toLowerCase());
+          if (parts.length >= 3 && parts[1]?.toLowerCase() === "status") articleHandles.add(parts[0].toLowerCase());
+        } catch { /* Ignore malformed links and continue with visible author text. */ }
       }
+      const authorText = article.querySelector('[data-testid="User-Name"]')?.innerText || "";
+      for (const match of authorText.matchAll(/@([A-Za-z0-9_]{1,15})/g)) articleHandles.add(match[1].toLowerCase());
+      return [...articleHandles].some((handle) => ownHandles.has(handle));
     });
+    if (matchedArticle) return true;
+    return [...document.querySelectorAll('[data-testid="User-Name"]')].some((authorNode) => {
+      const handles = new Set();
+      for (const match of String(authorNode.innerText || "").matchAll(/@([A-Za-z0-9_]{1,15})/g)) handles.add(match[1].toLowerCase());
+      for (const link of authorNode.querySelectorAll('a[href]')) {
+        try {
+          const parts = new URL(link.getAttribute("href") || "", location.origin).pathname.split("/").filter(Boolean);
+          if (parts.length === 1 && /^[A-Za-z0-9_]{1,15}$/.test(parts[0])) handles.add(parts[0].toLowerCase());
+        } catch { /* Ignore malformed author links. */ }
+      }
+      if (![...handles].some((handle) => ownHandles.has(handle))) return false;
+      const tweetNode = authorNode.closest('[data-testid="tweet"]');
+      return !tweetNode || !articleHasTweetKey(tweetNode, key);
+    });
+  }
+  function articleHasTweetKey(article, key) {
+    if (!article || !key) return false;
+    return [...article.querySelectorAll('a[href*="/status/"]')]
+      .some((link) => normalizeTweetUrl(link.getAttribute("href") || "") === key);
   }
   async function refreshAutoRepeatPolicy(job, runId) {
     if (job?.directMultiMode) return job;
@@ -3631,14 +3656,16 @@
   async function waitForReplyEditor(timeoutMs) { const deadline = Date.now() + timeoutMs; while (Date.now() < deadline) { const editor = findReplyEditor(); if (editor && editor.isConnected) return editor; await delay(250); } return null; }
   async function waitForTweetPage(tweet, timeoutMs, detectExistingReply = false) {
     const deadline = Date.now() + timeoutMs;
-    const statusId = new URL(tweet.url).pathname.split("/").filter(Boolean).pop();
+    const targetKey = normalizeTweetUrl(tweet.url);
     let readyAt = 0;
     if (detectExistingReply && await hasExistingReply(tweet)) return "alreadyReplied";
     while (Date.now() < deadline) {
       if (detectExistingReply && hasVisibleOwnReply(tweet)) return "alreadyReplied";
-      const article = [...document.querySelectorAll('article[data-testid="tweet"]')]
-        .find((item) => item.querySelector(`a[href*="/status/${statusId}"]`));
-      const ready = Boolean(findReplyEditor() || article);
+      const articles = [...document.querySelectorAll('article[data-testid="tweet"]')];
+      const targetArticle = articles.find((article) => articleHasTweetKey(article, targetKey));
+      // X changes status-link/editor wrappers frequently. Once timeline content
+      // is visible, downstream editor handling can decide whether replying is possible.
+      const ready = Boolean(findReplyEditor() || targetArticle || articles.length);
       if (ready && !detectExistingReply) return "ready";
       if (ready) {
         readyAt ||= Date.now();
