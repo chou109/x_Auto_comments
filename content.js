@@ -97,6 +97,17 @@
     if (latest.accountId && latest.accountId !== "unknown" && state.accountId !== "unknown" && latest.accountId !== state.accountId) return null;
     return latest;
   }
+  async function ensureAutoJobRunId(job) {
+    if (job?._runId) return job;
+    const latest = (await chrome.storage.local.get("autoJob")).autoJob;
+    if (!latest?.active || !state.tabId) return null;
+    if (latest.ownerTabId != null && latest.ownerTabId !== state.tabId && Number(latest.leaseUntil || 0) > Date.now()) return null;
+    latest._runId = makeRunId();
+    latest.ownerTabId = state.tabId;
+    latest.leaseUntil = Date.now() + 90000;
+    await chrome.storage.local.set({ autoJob: latest });
+    return latest;
+  }
   async function commitJobMutation(storageKey, expectedRunId, mutate) {
     const latest = await chrome.storage.local.get(storageKey);
     const job = latest[storageKey];
@@ -155,7 +166,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.18</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.19</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -1746,6 +1757,20 @@
     if (!job?.active || !job.items?.length) return;
     // Local runner gate: prevent duplicate concurrent runners for the same job.
     if (runningJobs["autoJob"]) return;
+    if (!job._runId) {
+      runningJobs["autoJob"] = "migrating";
+      try {
+        job = await ensureAutoJobRunId(job);
+      } catch (error) {
+        const detail = String(error?.message || error || "未知错误").slice(0, 120);
+        console.error("[XRC] 旧自动回复任务迁移失败", error);
+        showJobBar(`旧任务恢复失败：${detail}；请结束当前任务后重新启动`);
+        return;
+      } finally {
+        if (runningJobs["autoJob"] === "migrating") runningJobs["autoJob"] = null;
+      }
+      if (!job?._runId || runningJobs["autoJob"]) return;
+    }
     const myRunId = job._runId;
     runningJobs["autoJob"] = myRunId;
     try {
@@ -1786,6 +1811,9 @@
       if (!resumedAfterLoad || resumedAfterLoad._runId !== myRunId) { releaseAutoRun(myRunId); return; }
       Object.assign(job, resumedAfterLoad);
       if (!isAutoRunCurrent(myRunId)) return;
+      const policyJob = await refreshAutoRepeatPolicy(job, myRunId);
+      if (!policyJob || !isAutoRunCurrent(myRunId)) return;
+      Object.assign(job, policyJob);
       if (!job.allowRepeat && await hasExistingReply(tweet)) {
         await rememberReplied(tweet.url);
         return advanceSkippedJob(job, "检测到已经回复过");
@@ -2335,14 +2363,32 @@
       state.repliedUrls.add(key);
       return true;
     }
+    const ownHandles = new Set();
+    if (state.accountId && state.accountId !== "unknown") ownHandles.add(String(state.accountId).toLowerCase());
     const profileHref = document.querySelector('[data-testid="AppTabBar_Profile_Link"]')?.getAttribute("href") || "";
-    const myHandle = profileHref.split("/").filter(Boolean)[0]?.toLowerCase();
-    if (!myHandle) return false;
-    const targetPath = new URL(tweet.url).pathname;
+    const profileHandle = profileHref.split("/").filter(Boolean)[0]?.toLowerCase();
+    if (profileHandle) ownHandles.add(profileHandle);
+    if (!ownHandles.size) return false;
     return [...document.querySelectorAll('article[data-testid="tweet"]')].some((article) => {
       const href = article.querySelector('time')?.closest('a[href*="/status/"]')?.getAttribute("href") || "";
-      const parts = href.split("/").filter(Boolean);
-      return href !== targetPath && parts[0]?.toLowerCase() === myHandle;
+      if (!href || normalizeTweetUrl(href) === key) return false;
+      try {
+        const handle = new URL(href, location.origin).pathname.split("/").filter(Boolean)[0]?.toLowerCase();
+        return ownHandles.has(handle);
+      } catch {
+        return false;
+      }
+    });
+  }
+  async function refreshAutoRepeatPolicy(job, runId) {
+    if (job?.directMultiMode) return job;
+    const stored = await chrome.storage.local.get("replyAlreadyReplied");
+    const allowRepeat = Boolean(stored.replyAlreadyReplied ?? state.settings.replyAlreadyReplied);
+    state.settings.replyAlreadyReplied = allowRepeat;
+    if (job.allowRepeat === allowRepeat) return job;
+    return commitJobMutation("autoJob", runId, (latest) => {
+      latest.allowRepeat = allowRepeat;
+      return latest;
     });
   }
   async function rememberReplied(url) { state.repliedUrls.add(normalizeTweetUrl(url)); const values = [...state.repliedUrls].filter(Boolean).slice(-5000); state.repliedUrls = new Set(values); await chrome.storage.local.set({ repliedTweetUrls: values }); }
@@ -3732,6 +3778,7 @@
     return job.ownerTabId == null || job.ownerTabId === state.tabId || Number(job.leaseUntil || 0) <= Date.now();
   }
   async function restorePersistedJobIfIdle() {
+    if (state.autoRunning && !runningJobs["autoJob"]) state.autoRunning = false;
     if (state.autoRunning || state.postRunning || state.collecting) return;
     const saved = await chrome.storage.local.get(["autoJob", "postJob", "collectJob", "replyLoopJob"]);
     if (saved.autoJob?.active && !saved.autoJob.paused && ownsJob(saved.autoJob)) return resumeAutoJob(saved.autoJob);
