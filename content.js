@@ -152,7 +152,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.15</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.16</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -2033,16 +2033,28 @@
     job.skipped = (job.skipped || 0) + 1;
     job.current += 1;
     job.lastSkipReason = reason;
+    delete job.waitState;
+    delete job.nextRunAt;
     await chrome.storage.local.set({ autoJob: job });
     enqueueAiPrefetch(job, job.current);
     const target = job.target || job.items.length;
     if (job.sent >= target) return finishAutoJob(job, `任务完成：发送 ${job.sent} 条，跳过 ${job.skipped} 条`);
     if (job.current >= job.items.length) return finishAutoJob(job, `候选帖子已处理完：发送 ${job.sent} 条，跳过 ${job.skipped} 条`);
     showJobBar(`${reason}，继续下一条 · 已发送 ${job.sent} · 已跳过 ${job.skipped}`);
-    await waitJobDelay(job, 1.2);
-    const latest = await chrome.storage.local.get("autoJob");
-    if (!latest.autoJob?.active) return;
-    location.href = job.items[job.current].url;
+    await resilientDelay(1200);
+    const latest = (await chrome.storage.local.get("autoJob")).autoJob;
+    if (!latest?.active || latest.paused || latest._runId !== job._runId || !ownsJobFence(latest)) return;
+    Object.assign(job, latest);
+    const nextTweet = job.items?.[job.current];
+    if (!nextTweet?.url) return finishAutoJob(job, `候选帖子已处理完：发送 ${job.sent} 条，跳过 ${job.skipped} 条`);
+    const currentPath = new URL(location.href).pathname;
+    const nextPath = new URL(nextTweet.url).pathname;
+    if (currentPath === nextPath) {
+      runningJobs["autoJob"] = null;
+      state.autoRunning = false;
+      return resumeAutoJob(job);
+    }
+    return navigateAutoJob(job, nextTweet.url);
   }
 
   function enqueueAiPrefetch(job, startIndex = job?.current || 0) {
