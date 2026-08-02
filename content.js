@@ -83,11 +83,45 @@
   const runningJobs = {};
   function isAutoRunCurrent(runId) { return Boolean(runId) && runningJobs["autoJob"] === runId; }
   function releaseAutoRun(runId) { if (isAutoRunCurrent(runId)) runningJobs["autoJob"] = null; }
+  const AUTO_JOB_CHECKPOINT_KEY = "xrcAutoJobSkipCheckpoint";
   const AI_PREFETCH_CACHE_KEY = "xrcAiReplyPrefetch";
   const AI_PREFETCH_BUFFER_SIZE = 3;
   const LOOP_ACCOUNT_CACHE_LIMIT = 12000;
   function ownsJobFence(job) { return job?.ownerTabId === state.tabId && state.tabId != null; }
   function makeRunId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`; }
+  function writeAutoJobCheckpoint(job) {
+    try {
+      sessionStorage.setItem(AUTO_JOB_CHECKPOINT_KEY, JSON.stringify({
+        runId: job?._runId || "",
+        current: Number(job?.current || 0),
+        skipped: Number(job?.skipped || 0),
+        lastSkipReason: job?.lastSkipReason || "",
+        updatedAt: Date.now()
+      }));
+    } catch { /* Storage checkpoint is a best-effort navigation fallback. */ }
+  }
+  function applyAutoJobCheckpoint(job) {
+    try {
+      const checkpoint = JSON.parse(sessionStorage.getItem(AUTO_JOB_CHECKPOINT_KEY) || "null");
+      if (!checkpoint || !job?.active || checkpoint.runId !== job._runId) {
+        sessionStorage.removeItem(AUTO_JOB_CHECKPOINT_KEY);
+        return job;
+      }
+      if (Number(checkpoint.current || 0) > Number(job.current || 0)) {
+        job.current = Number(checkpoint.current || 0);
+        job.skipped = Math.max(Number(job.skipped || 0), Number(checkpoint.skipped || 0));
+        job.lastSkipReason = checkpoint.lastSkipReason || job.lastSkipReason;
+        delete job.waitState;
+        delete job.nextRunAt;
+        chrome.storage.local.set({ autoJob: job }).catch(() => {});
+      }
+      sessionStorage.removeItem(AUTO_JOB_CHECKPOINT_KEY);
+      return job;
+    } catch {
+      try { sessionStorage.removeItem(AUTO_JOB_CHECKPOINT_KEY); } catch {}
+      return job;
+    }
+  }
   async function readRunnableJob(storageKey) {
     const latest = (await chrome.storage.local.get(storageKey))[storageKey];
     if (!latest?.active) return null;
@@ -166,7 +200,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.23</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.24</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -450,6 +484,7 @@
       restorePersistedJobIfIdle();
     });
     const saved = await chrome.storage.local.get(["autoJob", "postJob", "autoLastStatus", "postLastStatus", "repliedTweetUrls", "collectJob", "replyLoopJob"]);
+    saved.autoJob = applyAutoJobCheckpoint(saved.autoJob);
     const storedRepliedUrls = Array.isArray(saved.repliedTweetUrls) ? saved.repliedTweetUrls : [];
     const normalizedRepliedUrls = [...new Set(storedRepliedUrls.map(normalizeTweetUrl).filter(Boolean))].slice(-5000);
     state.repliedUrls = new Set(normalizedRepliedUrls);
@@ -2357,29 +2392,26 @@
   async function advanceSkippedJob(job, reason) {
     const runId = job?._runId;
     if (!isAutoRunCurrent(runId)) return;
-    const resumed = await waitUntilJobResumed(job);
-    if (!resumed || resumed._runId !== runId || !isAutoRunCurrent(runId)) return;
-    Object.assign(job, resumed);
-    const cleared = await clearReplyEditor();
-    if (!isAutoRunCurrent(runId)) return;
-    if (!cleared) {
-      return pauseAutoJobWithReason(job, `${reason}；X 草稿无法安全清空，任务已暂停，请手动清空后继续`);
+    const editor = findReplyEditor();
+    if (editor && (readEditorText(editor) || findComposerMediaPreview(editor))) {
+      const cleared = await settleWithin(clearReplyEditor(editor), 2500, false);
+      if (!isAutoRunCurrent(runId)) return;
+      if (!cleared) return pauseAutoJobWithReason(job, `${reason}；X 草稿无法安全清空，任务已暂停，请手动清空后继续`);
     }
     job.skipped = (job.skipped || 0) + 1;
     job.current += 1;
     job.lastSkipReason = reason;
     delete job.waitState;
     delete job.nextRunAt;
-    await chrome.storage.local.set({ autoJob: job });
+    writeAutoJobCheckpoint(job);
+    showJobBar(`${reason}，已跳过 ${job.skipped} 条，正在进入下一条…`);
+    const savedInTime = await settleWithin(chrome.storage.local.set({ autoJob: job }).then(() => true), 2000, false);
+    if (!isAutoRunCurrent(runId)) return;
+    if (!savedInTime) console.warn("[XRC] 跳过进度保存较慢，已使用页面检查点继续");
     enqueueAiPrefetch(job, job.current);
     const target = job.target || job.items.length;
     if (job.sent >= target) return finishAutoJob(job, `任务完成：发送 ${job.sent} 条，跳过 ${job.skipped} 条`);
     if (job.current >= job.items.length) return finishAutoJob(job, `候选帖子已处理完：发送 ${job.sent} 条，跳过 ${job.skipped} 条`);
-    showJobBar(`${reason}，继续下一条 · 已发送 ${job.sent} · 已跳过 ${job.skipped}`);
-    await resilientDelay(1200);
-    const latest = (await chrome.storage.local.get("autoJob")).autoJob;
-    if (!latest?.active || latest.paused || latest._runId !== runId || !ownsJobFence(latest) || !isAutoRunCurrent(runId)) return;
-    Object.assign(job, latest);
     const nextTweet = job.items?.[job.current];
     if (!nextTweet?.url) return finishAutoJob(job, `候选帖子已处理完：发送 ${job.sent} 条，跳过 ${job.skipped} 条`);
     const currentPath = new URL(location.href).pathname;
@@ -2387,9 +2419,12 @@
     if (currentPath === nextPath) {
       releaseAutoRun(runId);
       state.autoRunning = false;
-      return resumeAutoJob(job);
+      location.reload();
+      return;
     }
-    return navigateAutoJob(job, nextTweet.url);
+    releaseAutoRun(runId);
+    state.autoRunning = false;
+    location.href = nextTweet.url;
   }
 
   function enqueueAiPrefetch(job, startIndex = job?.current || 0) {
@@ -4062,6 +4097,12 @@
       delayWaiters.add(wake);
       timer = setTimeout(finish, Math.max(0, deadline - Date.now()));
     });
+  }
+  function settleWithin(promise, timeoutMs, fallback) {
+    let timer;
+    const guarded = Promise.resolve(promise).catch(() => fallback);
+    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(fallback), Math.max(0, Number(timeoutMs) || 0)); });
+    return Promise.race([guarded, timeout]).finally(() => clearTimeout(timer));
   }
   function delay(ms) { return resilientDelay(ms); }
   function toast(message, error = false) { const el = byId("xrc-toast"); el.textContent = localizeText(message); el.className = error ? "error show" : "show"; clearTimeout(toast.timer); toast.timer = setTimeout(() => el.className = "", 3500); }
