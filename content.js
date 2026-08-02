@@ -166,7 +166,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.22</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.23</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -396,7 +396,12 @@
     applyLocale();
     root.addEventListener("click", onClick);
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area !== "local" || !changes.xrcLanguage || !root.isConnected) return;
+      if (area !== "local") return;
+      if (changes.repliedTweetUrls) {
+        const values = Array.isArray(changes.repliedTweetUrls.newValue) ? changes.repliedTweetUrls.newValue : [];
+        state.repliedUrls = new Set(values.map(normalizeTweetUrl).filter(Boolean));
+      }
+      if (!changes.xrcLanguage || !root.isConnected) return;
       const locale = i18n?.normalizeLocale(changes.xrcLanguage.newValue) || "zh-CN";
       if (locale === state.locale) return;
       state.locale = locale;
@@ -1989,9 +1994,10 @@
       Object.assign(job, policyBeforeLoad);
       const detectExistingDuringLoad = !job.allowRepeat || (!job.directMultiMode && job.verifyCurrentBeforeRetry);
       if (detectExistingDuringLoad) showJobBar(`正在检查候选 ${job.current + 1}/${job.items.length} 是否已经回复…`, collectionMeta);
-      const pageState = await waitForTweetPage(tweet, 30000, detectExistingDuringLoad);
+      const pageState = await waitForTweetPage(tweet, 10000, detectExistingDuringLoad);
       if (pageState === "alreadyReplied") {
-        await rememberReplied(tweet.url);
+        showJobBar(`检测到候选 ${job.current + 1}/${job.items.length} 已经回复，正在跳过…`, collectionMeta);
+        rememberReplied(tweet.url);
         return advanceSkippedJob(job, "页面加载时检测到已经回复过");
       }
       if (pageState !== "ready") {
@@ -2009,22 +2015,16 @@
       if (!isAutoRunCurrent(myRunId)) return;
       tweet.loadRetries = 0;
       Object.assign(tweet, readCurrentTweet(tweet));
-      const resumedAfterLoad = await waitUntilJobResumed(job);
-      if (!resumedAfterLoad || resumedAfterLoad._runId !== myRunId) { releaseAutoRun(myRunId); return; }
-      Object.assign(job, resumedAfterLoad);
-      if (!isAutoRunCurrent(myRunId)) return;
-      const policyJob = await refreshAutoRepeatPolicy(job, myRunId);
-      if (!policyJob || !isAutoRunCurrent(myRunId)) return;
-      Object.assign(job, policyJob);
-      if (!job.allowRepeat && await hasExistingReply(tweet)) {
-        await rememberReplied(tweet.url);
+      if (!job.allowRepeat && hasExistingReply(tweet)) {
+        showJobBar(`检测到候选 ${job.current + 1}/${job.items.length} 已经回复，正在跳过…`, collectionMeta);
+        rememberReplied(tweet.url);
         return advanceSkippedJob(job, "检测到已经回复过");
       }
-      if (!job.directMultiMode && job.verifyCurrentBeforeRetry && await hasExistingReply(tweet)) {
+      if (!job.directMultiMode && job.verifyCurrentBeforeRetry && hasExistingReply(tweet)) {
         if (!isAutoRunCurrent(myRunId)) return;
         job.verifyCurrentBeforeRetry = false;
         await chrome.storage.local.set({ autoJob: job });
-        await rememberReplied(tweet.url);
+        rememberReplied(tweet.url);
         return advanceSkippedJob(job, "恢复任务时检测到当前帖子已经发送成功");
       }
       if (!isAutoRunCurrent(myRunId)) return;
@@ -2120,7 +2120,7 @@
       if (!committed) { releaseAutoRun(myRunId); return; }
       Object.assign(job, committed);
       await recordSuccessfulSend("reply");
-      await rememberReplied(tweet.url);
+      rememberReplied(tweet.url);
       if (state.settings.autoLikeReply) likeMostRecentOwnPost().catch(() => {});
       const waitSeconds = chooseJobDelay(job);
       enqueueAiPrefetch(job, job.current);
@@ -2557,15 +2557,9 @@
     }
     return null;
   }
-  async function hasExistingReply(tweet) {
+  function hasExistingReply(tweet) {
     const key = normalizeTweetUrl(tweet.url);
     if (state.repliedUrls.has(key)) return true;
-    const stored = await chrome.storage.local.get("repliedTweetUrls");
-    const persisted = new Set((Array.isArray(stored.repliedTweetUrls) ? stored.repliedTweetUrls : []).map(normalizeTweetUrl).filter(Boolean));
-    if (persisted.has(key)) {
-      state.repliedUrls.add(key);
-      return true;
-    }
     return hasVisibleOwnReply(tweet);
   }
   function hasVisibleOwnReply(tweet) {
@@ -2623,7 +2617,14 @@
       return latest;
     });
   }
-  async function rememberReplied(url) { state.repliedUrls.add(normalizeTweetUrl(url)); const values = [...state.repliedUrls].filter(Boolean).slice(-5000); state.repliedUrls = new Set(values); await chrome.storage.local.set({ repliedTweetUrls: values }); }
+  function rememberReplied(url) {
+    state.repliedUrls.add(normalizeTweetUrl(url));
+    const values = [...state.repliedUrls].filter(Boolean).slice(-5000);
+    state.repliedUrls = new Set(values);
+    chrome.storage.local.set({ repliedTweetUrls: values }).catch((error) => {
+      if (!isExtensionContextInvalidated(error)) console.error("[XRC] 回复历史保存失败", error);
+    });
+  }
   function normalizeTweetUrl(url) {
     const raw = String(url || "").trim();
     if (/^status:\d+$/i.test(raw)) return raw.toLowerCase();
@@ -3658,7 +3659,7 @@
     const deadline = Date.now() + timeoutMs;
     const targetKey = normalizeTweetUrl(tweet.url);
     let readyAt = 0;
-    if (detectExistingReply && await hasExistingReply(tweet)) return "alreadyReplied";
+    if (detectExistingReply && hasExistingReply(tweet)) return "alreadyReplied";
     while (Date.now() < deadline) {
       if (detectExistingReply && hasVisibleOwnReply(tweet)) return "alreadyReplied";
       const articles = [...document.querySelectorAll('article[data-testid="tweet"]')];
