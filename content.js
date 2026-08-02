@@ -166,7 +166,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.20</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.21</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -1984,8 +1984,17 @@
       if (!location.href.includes(new URL(tweet.url).pathname)) { await navigateAutoJob(job, tweet.url); releaseAutoRun(myRunId); return; }
       const repeatProgress = tweet.directRepeatTotal ? ` · 当前帖子第 ${tweet.directRepeatIndex}/${tweet.directRepeatTotal} 条` : "";
       showJobBar(`目标发送 ${target} 条 · 候选 ${job.current + 1}/${job.items.length}${repeatProgress} · 已发送 ${job.sent} · 已跳过 ${job.skipped}`, collectionMeta);
-      const pageReady = await waitForTweetPage(tweet, 30000);
-      if (!pageReady) {
+      const policyBeforeLoad = await refreshAutoRepeatPolicy(job, myRunId);
+      if (!policyBeforeLoad || !isAutoRunCurrent(myRunId)) return;
+      Object.assign(job, policyBeforeLoad);
+      const detectExistingDuringLoad = !job.allowRepeat || (!job.directMultiMode && job.verifyCurrentBeforeRetry);
+      if (detectExistingDuringLoad) showJobBar(`正在检查候选 ${job.current + 1}/${job.items.length} 是否已经回复…`, collectionMeta);
+      const pageState = await waitForTweetPage(tweet, 30000, detectExistingDuringLoad);
+      if (pageState === "alreadyReplied") {
+        await rememberReplied(tweet.url);
+        return advanceSkippedJob(job, "页面加载时检测到已经回复过");
+      }
+      if (pageState !== "ready") {
         if (!isAutoRunCurrent(myRunId)) return;
         tweet.loadRetries = (tweet.loadRetries || 0) + 1;
         await chrome.storage.local.set({ autoJob: job });
@@ -2557,6 +2566,10 @@
       state.repliedUrls.add(key);
       return true;
     }
+    return hasVisibleOwnReply(tweet);
+  }
+  function hasVisibleOwnReply(tweet) {
+    const key = normalizeTweetUrl(tweet.url);
     const ownHandles = new Set();
     if (state.accountId && state.accountId !== "unknown") ownHandles.add(String(state.accountId).toLowerCase());
     const profileHref = document.querySelector('[data-testid="AppTabBar_Profile_Link"]')?.getAttribute("href") || "";
@@ -3616,7 +3629,29 @@
     return editors.sort((a, b) => elementPriority(b) - elementPriority(a))[0] || null;
   }
   async function waitForReplyEditor(timeoutMs) { const deadline = Date.now() + timeoutMs; while (Date.now() < deadline) { const editor = findReplyEditor(); if (editor && editor.isConnected) return editor; await delay(250); } return null; }
-  async function waitForTweetPage(tweet, timeoutMs) { const deadline = Date.now() + timeoutMs; const statusId = new URL(tweet.url).pathname.split("/").filter(Boolean).pop(); while (Date.now() < deadline) { if (findReplyEditor()) return true; const article = [...document.querySelectorAll('article[data-testid="tweet"]')].find((item) => item.querySelector(`a[href*="/status/${statusId}"]`)); if (article) return true; await delay(500); } return false; }
+  async function waitForTweetPage(tweet, timeoutMs, detectExistingReply = false) {
+    const deadline = Date.now() + timeoutMs;
+    const statusId = new URL(tweet.url).pathname.split("/").filter(Boolean).pop();
+    let readyAt = 0;
+    if (detectExistingReply && await hasExistingReply(tweet)) return "alreadyReplied";
+    while (Date.now() < deadline) {
+      if (detectExistingReply && hasVisibleOwnReply(tweet)) return "alreadyReplied";
+      const article = [...document.querySelectorAll('article[data-testid="tweet"]')]
+        .find((item) => item.querySelector(`a[href*="/status/${statusId}"]`));
+      const ready = Boolean(findReplyEditor() || article);
+      if (ready && !detectExistingReply) return "ready";
+      if (ready) {
+        readyAt ||= Date.now();
+        // Replies often render just after the target article/composer. Give
+        // that thread content a short settling window before generating text.
+        if (Date.now() - readyAt >= 2500) return "ready";
+      } else {
+        readyAt = 0;
+      }
+      await delay(300);
+    }
+    return "timeout";
+  }
   async function clearReplyEditor(targetEditor = findReplyEditor()) {
     const editor = targetEditor?.isConnected ? targetEditor : findReplyEditor();
     if (!editor) return true;
