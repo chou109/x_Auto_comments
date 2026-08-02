@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "X Reply Copilot",
-  "version": "0.21.17",
+  "version": "0.21.18",
   "description": "Filter X posts, generate or select replies, and run posting tasks.",
   "permissions": ["storage", "unlimitedStorage", "alarms", "tabs"],
   "host_permissions": [

@@ -85,6 +85,7 @@
   function releaseAutoRun(runId) { if (isAutoRunCurrent(runId)) runningJobs["autoJob"] = null; }
   const AI_PREFETCH_CACHE_KEY = "xrcAiReplyPrefetch";
   const AI_PREFETCH_BUFFER_SIZE = 3;
+  const LOOP_ACCOUNT_CACHE_LIMIT = 12000;
   function ownsJobFence(job) { return job?.ownerTabId === state.tabId && state.tabId != null; }
   function makeRunId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`; }
   async function readRunnableJob(storageKey) {
@@ -154,7 +155,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.17</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.18</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -877,13 +878,20 @@
     if (!job?.active || state.collecting) return;
     state.collecting = true; state.collectStop = false;
     updateCollectButtons("停止账号采集", true, "account");
+    const excludedKeys = new Set((job.excludeUrls || []).map(normalizeTweetUrl).filter(Boolean));
     const collected = new Map((job.items || []).map((tweet) => [normalizeTweetUrl(tweet.url), tweet]));
-    let validItems = summarizeCollectedAccountResults([...collected.values()], job.author);
+    let validItems = summarizeCollectedAccountResults([...collected.values()], job.author, excludedKeys);
+    const passStartSize = collected.size;
     let staleRounds = 0, rounds = 0, reachedBottom = false, ageBoundaryRounds = 0, reachedAgeBoundary = false;
-    const bottomTracker = createCollectionBottomTracker();
     let bottomRecoveries = 0;
-    if (!collected.size) window.scrollTo({ top: 0, behavior: "auto" });
-    await delay(1200);
+    if (Number(job.resumeScrollTop || 0) > 0) {
+      updateCollectButtons(`停止账号采集（正在恢复上轮扫描位置，已扫描 ${collected.size}）`, true, "account");
+      await restoreAccountTimelinePosition(job.resumeScrollTop);
+    } else {
+      window.scrollTo({ top: 0, behavior: "auto" });
+      await delay(1200);
+    }
+    const bottomTracker = createCollectionBottomTracker();
     let lastScrollTop = Number((document.scrollingElement || document.documentElement)?.scrollTop || 0);
     while (!state.collectStop && validItems.length < job.limit) {
       if (!await waitUntilLoopCollectionResumed(job)) break;
@@ -895,7 +903,7 @@
         if (collected.has(key)) continue;
         collected.set(key, serializableTweet(tweet)); added += 1;
       }
-      if (added) validItems = summarizeCollectedAccountResults([...collected.values()], job.author);
+      if (added) validItems = summarizeCollectedAccountResults([...collected.values()], job.author, excludedKeys);
       const scrollTop = Number((document.scrollingElement || document.documentElement)?.scrollTop || 0);
       const viewportMoved = Math.abs(scrollTop - lastScrollTop) >= 120;
       lastScrollTop = scrollTop;
@@ -905,9 +913,11 @@
       reachedBottom = updateCollectionBottomTracker(bottomTracker, added);
       ageBoundaryRounds = accountTimelinePastAgeLimit(job.author) ? ageBoundaryRounds + 1 : 0;
       reachedAgeBoundary = ageBoundaryRounds >= 3;
-      updateCollectButtons(`停止账号采集（有效 ${Math.min(validItems.length, job.limit)}/${job.limit}，已扫描 ${collected.size}）`, true, "account");
+      const historyText = excludedKeys.size ? `，本循环已处理 ${excludedKeys.size}` : "";
+      updateCollectButtons(`停止账号采集（有效 ${Math.min(validItems.length, job.limit)}/${job.limit}，已扫描 ${collected.size}${historyText}）`, true, "account");
       if (rounds % 5 === 0 || added) {
         job.items = [...collected.values()];
+        job.resumeScrollTop = scrollTop;
         await chrome.storage.local.set({ collectJob: job });
       }
       if (validItems.length >= job.limit) break;
@@ -920,8 +930,12 @@
       // reload loop that repeatedly starts from the newest posts.
       if (reachedBottom || staleRounds >= 12) {
         bottomRecoveries += 1;
-        if (bottomRecoveries > 6) break;
+        if (bottomRecoveries > 6) {
+          job.resumeScrollTop = Number((document.scrollingElement || document.documentElement)?.scrollTop || lastScrollTop || 0);
+          return continueCollectionUntilValid(job, collected, validItems.length, passStartSize, "account");
+        }
         job.items = [...collected.values()];
+        job.resumeScrollTop = Number((document.scrollingElement || document.documentElement)?.scrollTop || lastScrollTop || 0);
         await chrome.storage.local.set({ collectJob: job });
         updateCollectButtons(`停止账号采集（有效 ${Math.min(validItems.length, job.limit)}/${job.limit}，已扫描 ${collected.size}；正在加载更早帖子 ${bottomRecoveries}/6）`, true, "account");
         await recoverAccountTimeline(bottomTracker, bottomRecoveries);
@@ -937,10 +951,12 @@
     job.items = [...collected.values()];
     job.reachedBottom = reachedBottom;
     job.reachedAgeBoundary = reachedAgeBoundary;
+    job.lastScrollTop = Number((document.scrollingElement || document.documentElement)?.scrollTop || job.resumeScrollTop || 0);
+    job.resumeScrollTop = job.lastScrollTop;
     await chrome.storage.local.remove("collectJob");
     state.collecting = false; state.collectStop = false;
     updateCollectButtons("", false);
-    validItems = summarizeCollectedAccountResults(job.items, job.author);
+    validItems = summarizeCollectedAccountResults(job.items, job.author, excludedKeys);
     state.tweets = sortTweets(validItems).slice(0, job.limit);
     const stats = validItems._stats || {};
     job.resultSummary = {
@@ -952,7 +968,8 @@
       alreadyReplied: stats.alreadyReplied || 0,
       lowLikes: stats.lowLikes || 0,
       tooOld: stats.tooOld || 0,
-      noAuthor: stats.noAuthor || 0
+      noAuthor: stats.noAuthor || 0,
+      previouslyScanned: stats.previouslyScanned || 0
     };
     renderList(); switchTab("queue");
     if (job.loop) return handleLoopCollectionComplete(job, state.tweets);
@@ -974,6 +991,7 @@
     const stats = validItems._stats;
     if (!stats) return "";
     const parts = [];
+    if (stats.previouslyScanned) parts.push(`本循环已处理 ${stats.previouslyScanned}`);
     if (stats.tooOld) parts.push(`太旧 ${stats.tooOld}`);
     if (stats.lowLikes) parts.push(`赞不够 ${stats.lowLikes}`);
     if (stats.replies) parts.push(`Reply ${stats.replies}`);
@@ -1040,13 +1058,17 @@
     toast(`${reason}；X 实际加载 ${collected.size} 条，保留 ${state.tweets.length} 条（正文未命中 ${summary.keywordMisses}、Reply ${summary.replies}、Quote ${summary.quotes}、已回复 ${summary.alreadyReplied}、赞不够 ${summary.lowLikes}、太旧 ${summary.tooOld}${summary.noAuthor ? `、作者不符 ${summary.noAuthor}` : ""}）`);
   }
 
-  function summarizeCollectedAccountResults(items, author) {
+  function summarizeCollectedAccountResults(items, author, excludedKeys = new Set()) {
     const normalizedAuthor = String(author || "").toLowerCase();
     const hasKeywords = splitTerms(state.settings.keywords).length > 0;
-    const stats = { kept: [], tooOld: 0, lowLikes: 0, replies: 0, quotes: 0, alreadyReplied: 0, keywordMisses: 0, noAuthor: 0 };
+    const excluded = excludedKeys instanceof Set ? excludedKeys : new Set((excludedKeys || []).map(normalizeTweetUrl).filter(Boolean));
+    const stats = { kept: [], tooOld: 0, lowLikes: 0, replies: 0, quotes: 0, alreadyReplied: 0, keywordMisses: 0, noAuthor: 0, previouslyScanned: 0 };
     const arr = Array.isArray(items) ? items : [];
     for (const tweet of arr) {
       if (String(tweet?.author || "").toLowerCase() !== normalizedAuthor) { stats.noAuthor += 1; continue; }
+      const key = normalizeTweetUrl(tweet.url);
+      if (excluded.has(key)) { stats.previouslyScanned += 1; continue; }
+      if (!state.settings.replyAlreadyReplied && (tweet.alreadyReplied || state.repliedUrls.has(key))) { stats.alreadyReplied += 1; continue; }
       if (hasKeywords) {
         const fullMatch = matchesFilters(tweet);
         const relaxedMatch = tweet.likes >= state.settings.minLikes &&
@@ -1061,7 +1083,6 @@
         if (tweet.likes < state.settings.minLikes) stats.lowLikes += 1;
         if (state.settings.excludeReplies && tweet.isReply) stats.replies += 1;
         if (state.settings.excludeQuotes && tweet.isQuote) stats.quotes += 1;
-        if (!state.settings.replyAlreadyReplied && tweet.alreadyReplied) stats.alreadyReplied += 1;
         if (!tweetTextMatchesKeywords(tweet.text, state.settings.keywords)) stats.keywordMisses += 1;
         continue;
       }
@@ -1070,7 +1091,6 @@
       if (tweet.likes < state.settings.minLikes) { stats.lowLikes += 1; continue; }
       if (state.settings.excludeReplies && tweet.isReply) { stats.replies += 1; continue; }
       if (state.settings.excludeQuotes && tweet.isQuote) { stats.quotes += 1; continue; }
-      if (!state.settings.replyAlreadyReplied && tweet.alreadyReplied) { stats.alreadyReplied += 1; continue; }
       stats.kept.push(tweet);
     }
     // 将 stats 挂到返回值上，调用方可通过 ._stats 获取明细
@@ -1100,15 +1120,33 @@
     job.items = [...collected.values()];
     job.pass = Number(job.pass || 0) + 1;
     job.noProgressPasses = madeProgress ? 0 : Number(job.noProgressPasses || 0) + 1;
-    // 连续 3 轮重载都没有扫到任何新帖子 → 页面已经到底，不再徒劳重试
-    if (job.noProgressPasses >= 3) {
+    const maxNoProgressPasses = mode === "account" ? 5 : 3;
+    // Profile timelines are more heavily virtualized, so allow additional
+    // position-restored passes before treating the current depth as exhausted.
+    if (job.noProgressPasses >= maxNoProgressPasses) {
       await chrome.storage.local.remove("collectJob");
       state.collecting = false; state.collectStop = false;
       updateCollectButtons("", false);
-      const validItems = mode === "search"
-        ? summarizeCollectedSearchResults(job.items).kept
-        : summarizeCollectedAccountResults(job.items, job.author);
+      const searchSummary = mode === "search" ? summarizeCollectedSearchResults(job.items) : null;
+      const validItems = searchSummary
+        ? searchSummary.kept
+        : summarizeCollectedAccountResults(job.items, job.author, job.excludeUrls || []);
       state.tweets = sortTweets(validItems).slice(0, job.limit);
+      const stats = searchSummary || validItems._stats || {};
+      job.reachedBottom = true;
+      job.lastScrollTop = Number(job.resumeScrollTop || 0);
+      job.resultSummary = {
+        scanned: collected.size,
+        kept: state.tweets.length,
+        keywordMisses: stats.keywordMisses || 0,
+        replies: stats.replies || 0,
+        quotes: stats.quotes || 0,
+        alreadyReplied: stats.alreadyReplied || 0,
+        lowLikes: stats.lowLikes || 0,
+        tooOld: stats.tooOld || 0,
+        noAuthor: stats.noAuthor || 0,
+        previouslyScanned: stats.previouslyScanned || 0
+      };
       renderList(); switchTab("queue");
       if (job.loop) return handleLoopCollectionComplete(job, state.tweets);
       const filterHints = [];
@@ -1128,7 +1166,7 @@
     job.leaseUntil = Date.now() + 90000;
     await chrome.storage.local.set({ collectJob: job });
     state.collecting = false;
-    updateCollectButtons(`停止${mode === "search" ? "关键词" : "账号"}采集（有效 ${validCount}/${job.limit}，已扫描 ${collected.size}；${delaySeconds} 秒后重试 ${job.noProgressPasses + 1}/3）`, true, mode);
+    updateCollectButtons(`停止${mode === "search" ? "关键词" : "账号"}采集（有效 ${validCount}/${job.limit}，已扫描 ${collected.size}；${delaySeconds} 秒后重试 ${job.noProgressPasses}/${maxNoProgressPasses}）`, true, mode);
     await resilientDelay(Math.min(delaySeconds * 1000, 1500));
     const latest = (await chrome.storage.local.get("collectJob")).collectJob;
     if (!latest?.active || state.collectStop) {
@@ -1137,7 +1175,7 @@
       updateCollectButtons("", false);
       const validItems = mode === "search"
         ? summarizeCollectedSearchResults(job.items).kept
-        : summarizeCollectedAccountResults(job.items, job.author);
+        : summarizeCollectedAccountResults(job.items, job.author, job.excludeUrls || []);
       state.tweets = sortTweets(validItems).slice(0, job.limit);
       renderList(); switchTab("queue");
       if (job.loop) return handleLoopCollectionComplete(job, state.tweets);
@@ -1153,7 +1191,7 @@
     const items = Array.isArray(job?.items) ? job.items : [];
     const validItems = job?.mode === "search"
       ? summarizeCollectedSearchResults(items).kept
-      : summarizeCollectedAccountResults(items, job?.author);
+      : summarizeCollectedAccountResults(items, job?.author, job?.excludeUrls || []);
     state.tweets = sortTweets(validItems).slice(0, Number(job?.limit || validItems.length));
     renderList(); switchTab("queue");
     if (job?.loop) return handleLoopCollectionComplete(job, state.tweets);
@@ -1163,6 +1201,25 @@
   function serializableTweet(tweet) {
     const { article, ...plain } = tweet;
     return plain;
+  }
+
+  function mergeLoopAccountItems(existing, incoming) {
+    const merged = new Map();
+    for (const tweet of [...(existing || []), ...(incoming || [])]) {
+      const key = normalizeTweetUrl(tweet?.url);
+      if (!key) continue;
+      merged.set(key, serializableTweet(tweet));
+    }
+    return [...merged.values()].slice(-LOOP_ACCOUNT_CACHE_LIMIT);
+  }
+
+  function mergeLoopAccountKeys(existing, tweets) {
+    const merged = new Set((existing || []).map(normalizeTweetUrl).filter(Boolean));
+    for (const tweet of tweets || []) {
+      const key = normalizeTweetUrl(tweet?.url);
+      if (key) merged.add(key);
+    }
+    return [...merged].slice(-LOOP_ACCOUNT_CACHE_LIMIT);
   }
 
   function scrollCollectionPage(round) {
@@ -1196,6 +1253,26 @@
     const scroller = document.scrollingElement || document.documentElement;
     tracker.lastHeight = Math.max(scroller?.scrollHeight || 0, document.body?.scrollHeight || 0);
     tracker.stableRounds = 0;
+  }
+
+  async function restoreAccountTimelinePosition(targetTop) {
+    const target = Math.max(0, Number(targetTop) || 0);
+    if (!target) { await resilientDelay(1200); return; }
+    let previousTop = -1;
+    for (let attempt = 0; attempt < 16 && !state.collectStop; attempt += 1) {
+      const scroller = document.scrollingElement || document.documentElement;
+      if (!scroller) break;
+      window.scrollTo({ top: target, behavior: "auto" });
+      await resilientDelay(Math.min(1800, 650 + attempt * 75));
+      const currentTop = Number(scroller.scrollTop || 0);
+      if (currentTop >= target - Math.max(window.innerHeight, 900)) return;
+      if (Math.abs(currentTop - previousTop) < 80) {
+        window.scrollBy({ top: -Math.max(Math.round(window.innerHeight * 0.3), 240), behavior: "auto" });
+        await resilientDelay(250);
+        window.scrollTo({ top: target, behavior: "auto" });
+      }
+      previousTop = currentTop;
+    }
   }
 
   function matchesCollectedSearchResult(tweet) {
@@ -1243,6 +1320,7 @@
       roundLimit: filters.loopRoundLimit, intervalMinutes: filters.loopRoundIntervalMinutes,
       emptyRoundLimit: filters.loopEmptyRoundLimit, sent: 0, skipped: 0, rounds: 0,
       emptyRounds: 0, author: authors[0] || "", keywords: filters.keywords,
+      accountScanItems: [], accountConsumedUrls: [], accountResumeScrollTop: 0,
       homeUrl: location.href, ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000, startedAt: Date.now(), phase: "collecting"
     };
     await chrome.storage.local.set({ replyLoopJob: job });
@@ -1270,6 +1348,9 @@
       // 账号模式也需刷新 settings，确保 maxAgeDays/minLikes 等过滤条件是最新的
       Object.assign(state.settings, await chrome.storage.local.get(Object.keys(DEFAULTS)));
       collectJob.author = job.author;
+      collectJob.items = Array.isArray(job.accountScanItems) ? job.accountScanItems : [];
+      collectJob.excludeUrls = Array.isArray(job.accountConsumedUrls) ? job.accountConsumedUrls : [];
+      collectJob.resumeScrollTop = Number(job.accountResumeScrollTop || 0);
       targetUrl = `https://x.com/${job.author}`;
     }
     await chrome.storage.local.set({ collectJob });
@@ -1282,13 +1363,19 @@
     if (!loop?.active) return;
     if (loop.paused) return updateReplyLoopStatus(loop, "循环已暂停，点击“暂停/继续”恢复");
     loop.rounds = (loop.rounds || 0) + 1;
-    const candidates = (tweets || []).filter((tweet) => state.settings.replyAlreadyReplied || !tweet.alreadyReplied);
+    const candidates = (tweets || []).filter((tweet) => state.settings.replyAlreadyReplied || !(tweet.alreadyReplied || state.repliedUrls.has(normalizeTweetUrl(tweet.url))));
+    if (collectJob?.mode === "account") {
+      loop.accountScanItems = mergeLoopAccountItems(loop.accountScanItems, collectJob.items);
+      loop.accountConsumedUrls = mergeLoopAccountKeys(loop.accountConsumedUrls, candidates);
+      loop.accountResumeScrollTop = Number(collectJob.lastScrollTop || collectJob.resumeScrollTop || loop.accountResumeScrollTop || 0);
+    }
+    state.loopCollectionSummary = collectJob?.resultSummary || null;
     if (!candidates.length) {
       loop.emptyRounds = (loop.emptyRounds || 0) + 1;
       loop.skipped = (loop.skipped || 0) + (tweets?.length || 0);
       const summary = collectJob?.resultSummary;
       const details = summary
-        ? `；扫描 ${summary.scanned} 条，排除：正文未命中 ${summary.keywordMisses}、Reply ${summary.replies}、Quote ${summary.quotes}、已回复 ${summary.alreadyReplied}、赞不够 ${summary.lowLikes}、太旧 ${summary.tooOld}${summary.noAuthor ? `、作者不符 ${summary.noAuthor}` : ""}`
+        ? `；扫描 ${summary.scanned} 条，排除：本循环已处理 ${summary.previouslyScanned || 0}、正文未命中 ${summary.keywordMisses}、Reply ${summary.replies}、Quote ${summary.quotes}、已回复 ${summary.alreadyReplied}、赞不够 ${summary.lowLikes}、太旧 ${summary.tooOld}${summary.noAuthor ? `、作者不符 ${summary.noAuthor}` : ""}`
         : "";
       if (loop.emptyRounds >= loop.emptyRoundLimit) return finishReplyLoop(loop, `连续 ${loop.emptyRounds} 轮没有可评论帖子，已自动停止${details}`);
       return scheduleNextReplyLoopRound(loop, `第 ${loop.rounds} 轮没有新候选${details}`);
@@ -1647,6 +1734,7 @@
     const target = fromLoop ? Math.min(requestedTarget, candidates.length) : requestedTarget;
     const items = candidates.map(({ author, text, likes, views, ageHours, url, alreadyReplied }) => ({ author, text, likes, views, ageHours, url, alreadyReplied }));
     const job = { active: true, paused: false, loop: Boolean(fromLoop), directMultiMode, items, requestedTarget, target, excludedAlreadyReplied: state.tweets.length - baseCandidates.length, current: 0, sent: 0, skipped: 0, returnUrl: location.href, allowRepeat: directMultiMode || state.settings.replyAlreadyReplied, replySource: state.settings.replySource, specifiedReplies: specified, specifiedReplyOrder: state.settings.specifiedReplyOrder, replyMode: state.settings.replyMode, customPrompt: state.settings.customPrompt, maxChars: state.settings.maxChars, suggestionCount: 1, delayMode: state.settings.delayMode, delaySeconds: state.settings.autoDelaySeconds, randomDelayMin: state.settings.randomDelayMin, randomDelayMax: state.settings.randomDelayMax, imageUseChance: state.settings.imageUseChance, imageCount: state.settings.imageCount || 1, imageSelectionMode: state.settings.imageSelectionMode || "random", startedAt: Date.now(), ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000, failureStreak: 0, _runId: makeRunId() };
+    if (fromLoop && state.loopCollectionSummary) job.collectionSummary = state.loopCollectionSummary;
     state.autoStatus = `正在创建 ${job.target} 条自动回复任务 · ${delayDescription}`; renderList();
     await chrome.storage.local.set({ autoJob: job });
     enqueueAiPrefetch(job, 0);
@@ -1670,13 +1758,14 @@
       Object.assign(job, resumedAtStart);
       const target = job.target || job.items.length;
       job.skipped = job.skipped || 0;
-      showJobBar(`目标 ${target} 条 · 已发送 ${job.sent} · 已跳过 ${job.skipped}`);
+      const collectionMeta = formatCollectionSummaryMeta(job.collectionSummary);
+      showJobBar(`目标 ${target} 条 · 已发送 ${job.sent} · 已跳过 ${job.skipped}`, collectionMeta);
       const tweet = job.items[job.current];
       if (!tweet || job.sent >= target) return finishAutoJob(job, `任务完成，共发送 ${job.sent} 条`);
       if (job.replySource === "ai") enqueueAiPrefetch(job, job.current);
       if (!location.href.includes(new URL(tweet.url).pathname)) { await navigateAutoJob(job, tweet.url); releaseAutoRun(myRunId); return; }
       const repeatProgress = tweet.directRepeatTotal ? ` · 当前帖子第 ${tweet.directRepeatIndex}/${tweet.directRepeatTotal} 条` : "";
-      showJobBar(`目标发送 ${target} 条 · 候选 ${job.current + 1}/${job.items.length}${repeatProgress} · 已发送 ${job.sent} · 已跳过 ${job.skipped}`);
+      showJobBar(`目标发送 ${target} 条 · 候选 ${job.current + 1}/${job.items.length}${repeatProgress} · 已发送 ${job.sent} · 已跳过 ${job.skipped}`, collectionMeta);
       const pageReady = await waitForTweetPage(tweet, 30000);
       if (!pageReady) {
         if (!isAutoRunCurrent(myRunId)) return;
@@ -1775,7 +1864,7 @@
       if (!button || !scopeContainsElement(activeEditor, button)) return retryCurrentStep(job, tweet, "buttonRetries", "发送按钮不在当前回复框中", 1);
       const priorOwnPostKeys = snapshotRecentOwnPostKeys();
       button.click();
-      showJobBar(`正在确认第 ${job.sent + 1}/${target} 条是否发送成功…`);
+      showJobBar(`正在确认第 ${job.sent + 1}/${target} 条是否发送成功…`, collectionMeta);
       const submission = await waitForReplySubmission(30000, expectedText, {
         allowRecentOwnPost: !job.directMultiMode,
         priorOwnPostKeys,
@@ -3226,6 +3315,12 @@
       detail.textContent = meta ? localizeText(meta) : "";
       detail.hidden = !meta;
     }
+  }
+  function formatCollectionSummaryMeta(summary) {
+    if (!summary) return "";
+    const scanned = Number(summary.scanned || 0);
+    const kept = Number(summary.kept || 0);
+    return `本轮实际扫描 ${scanned} 条 · 过滤 ${Math.max(0, scanned - kept)} 条 · 候选 ${kept} 条`;
   }
   function showJobBar(message, meta = "", waiting = false) { renderTaskBar("xrc-jobbar", message, meta, waiting); }
   function byId(id) { return root.querySelector(`#${id}`); }
