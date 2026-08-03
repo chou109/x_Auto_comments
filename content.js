@@ -77,7 +77,7 @@
   };
   const REPLY_PROFILE_KEYS = ["authors", "keywords", "targetUrls", "directTargetRepeatCount", "accountCollectLimit", "loopMode", "loopTotalLimit", "loopRoundLimit", "loopRoundIntervalMinutes", "loopEmptyRoundLimit", "minLikes", "maxAgeDays", "excludeReplies", "excludeQuotes", "replyAlreadyReplied", "strictKeywordBody", "sortBy", "replySource", "specifiedReplies", "specifiedReplyOrder", "replyMode", "customPrompt", "maxChars", "suggestionCount", "autoReplyCount", "autoDelaySeconds", "delayMode", "randomDelayMin", "randomDelayMax", "imageUseChance", "imageCount", "imageSelectionMode", "imageLibrary", "activeHoursEnabled", "activeHourStart", "activeHourEnd", "replyHourlyLimit", "replyDailyLimit", "consecutiveFailureLimit"];
   const POST_PROFILE_KEYS = ["postSource", "postSpecifiedContents", "postSpecifiedOrder", "postAiPrompt", "postMaxChars", "autoPostCount", "postDelayMode", "postDelaySeconds", "postRandomDelayMin", "postRandomDelayMax", "postImageUseChance", "postImageCount", "postImageSelectionMode", "postImageLibrary", "postDestination", "postCommunity", "postLoopEnabled", "postLoopTotalLimit", "postLoopRoundIntervalMinutes", "postLoopEmptyRoundLimit", "activeHoursEnabled", "activeHourStart", "activeHourEnd", "postHourlyLimit", "postDailyLimit", "consecutiveFailureLimit"];
-  const state = { settings: { ...DEFAULTS }, locale: "zh-CN", tweets: [], selected: null, minimized: false, autoRunning: false, postRunning: false, autoStop: false, autoConfirm: false, autoStatus: "", collecting: false, collectStop: false, repliedUrls: new Set(), tabId: null, accountId: "unknown", taskBars: { "xrc-jobbar": null, "xrc-post-jobbar": null } };
+  const state = { settings: { ...DEFAULTS }, locale: "zh-CN", tweets: [], selected: null, minimized: false, autoRunning: false, postRunning: false, autoStop: false, autoConfirm: false, autoStatus: "", collecting: false, collectStop: false, repliedUrls: new Set(), activeReplyProfile: "", tabId: null, accountId: "unknown", taskBars: { "xrc-jobbar": null, "xrc-post-jobbar": null } };
   const delayWaiters = new Set();
   const ownerInstanceId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const runningJobs = {};
@@ -87,8 +87,68 @@
   const AI_PREFETCH_CACHE_KEY = "xrcAiReplyPrefetch";
   const AI_PREFETCH_BUFFER_SIZE = 3;
   const LOOP_ACCOUNT_CACHE_LIMIT = 12000;
+  const REPLIED_HISTORY_PREFIX = "repliedTweetUrls:";
   function ownsJobFence(job) { return job?.ownerTabId === state.tabId && state.tabId != null; }
   function makeRunId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`; }
+  function activeReplyProfileStorageKey(accountId = state.accountId) {
+    const normalized = String(accountId || "").trim().toLowerCase();
+    return normalized && normalized !== "unknown" ? `xrcActiveReplyProfile:${normalized}` : "";
+  }
+  function repliedHistoryStorageKey(accountId = state.accountId, profileName = state.activeReplyProfile) {
+    const normalizedAccount = String(accountId || "").trim().toLowerCase();
+    if (!normalizedAccount || normalizedAccount === "unknown") return "";
+    const normalizedProfile = String(profileName || "").trim();
+    const profileScope = normalizedProfile ? `profile:${encodeURIComponent(normalizedProfile)}` : "default";
+    return `${REPLIED_HISTORY_PREFIX}${normalizedAccount}:${profileScope}`;
+  }
+  function normalizeRepliedHistory(values) {
+    return [...new Set((Array.isArray(values) ? values : []).map(normalizeTweetUrl).filter(Boolean))].slice(-5000);
+  }
+  function isTweetReplied(tweet) {
+    return state.repliedUrls.has(normalizeTweetUrl(tweet?.url));
+  }
+  async function loadActiveRepliedHistory() {
+    const storageKey = repliedHistoryStorageKey();
+    if (!storageKey) {
+      state.repliedUrls = new Set();
+    } else {
+      const stored = await chrome.storage.local.get(storageKey);
+      if (storageKey !== repliedHistoryStorageKey()) return;
+      const rawValues = stored[storageKey];
+      const normalized = normalizeRepliedHistory(rawValues);
+      state.repliedUrls = new Set(normalized);
+      if (normalized.length !== (Array.isArray(rawValues) ? rawValues.length : 0) ||
+          normalized.some((value, index) => value !== rawValues[index])) {
+        await chrome.storage.local.set({ [storageKey]: normalized });
+      }
+    }
+    for (const tweet of state.tweets) tweet.alreadyReplied = isTweetReplied(tweet);
+    if (root.isConnected) renderList();
+  }
+  async function activateReplyProfile(profileName) {
+    state.activeReplyProfile = String(profileName || "").trim();
+    const storageKey = activeReplyProfileStorageKey();
+    if (storageKey) await chrome.storage.local.set({ [storageKey]: state.activeReplyProfile });
+    await loadActiveRepliedHistory();
+  }
+  async function ensureReplyProfileContext(job) {
+    if (typeof job?.replyProfile !== "string" || job.replyProfile === state.activeReplyProfile) return;
+    await activateReplyProfile(job.replyProfile);
+    await renderProfileSelectors(job.replyProfile);
+  }
+  async function hasActiveReplyTask() {
+    if (state.autoRunning || state.collecting) return true;
+    const jobs = await chrome.storage.local.get(["autoJob", "collectJob", "replyLoopJob"]);
+    return Boolean(jobs.autoJob?.active || jobs.collectJob?.active || jobs.replyLoopJob?.active);
+  }
+  async function changeReplyProfileFromUi(profileName) {
+    if (await hasActiveReplyTask()) {
+      await renderProfileSelectors(state.activeReplyProfile);
+      return toast("评论或采集任务运行期间不能切换方案，请先结束当前任务", true);
+    }
+    if (profileName) return loadNamedProfile("reply", true);
+    await activateReplyProfile("");
+  }
   function writeAutoJobCheckpoint(job) {
     try {
       sessionStorage.setItem(AUTO_JOB_CHECKPOINT_KEY, JSON.stringify({
@@ -200,7 +260,7 @@
   root.classList.add("xrc-locale-pending");
   root.innerHTML = `
     <section class="xrc-panel">
-      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.24</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
+      <header><div><strong data-i18n="X 自动评论助手">X 自动评论助手</strong><small data-i18n="采集 · 评论 · 发帖">采集 · 评论 · 发帖</small><small class="xrc-version">v0.21.25</small></div><div><button id="xrc-language-toggle" class="xrc-language-toggle" data-act="toggle-language" title="Switch to English" aria-label="Switch to English">EN</button><button data-act="min" data-i18n-title="最小化" title="最小化">−</button><button data-act="close" data-i18n-title="关闭" title="关闭">×</button></div></header>
       <main>
         <div class="xrc-sticky-stack">
           <div id="xrc-jobbar" class="xrc-jobbar"><div class="xrc-jobbar-status"><span class="xrc-jobbar-primary"></span><small class="xrc-jobbar-meta"></small></div><div><button type="button" id="xrc-pause-job" class="pause" data-act="pause-job">暂停</button><button type="button" id="xrc-cancel-job" data-act="cancel-job">结束任务</button><button type="button" id="xrc-stop-loop-job" class="loop-stop xrc-hidden" data-act="stop-loop">终止循环</button></div></div>
@@ -422,18 +482,22 @@
     const context = await chrome.runtime.sendMessage({ type: "XRC_CONTEXT" }).catch(() => null);
     state.tabId = context?.tabId ?? null;
     state.accountId = await detectCurrentAccountId();
-    const stored = await chrome.storage.local.get(Object.keys(DEFAULTS).concat("apiKey", "xrcLanguage"));
+    const activeProfileKey = activeReplyProfileStorageKey();
+    const stored = await chrome.storage.local.get(Object.keys(DEFAULTS).concat("apiKey", "xrcLanguage", ...(activeProfileKey ? [activeProfileKey] : [])));
+    state.activeReplyProfile = activeProfileKey ? String(stored[activeProfileKey] || "") : "";
     state.settings = { ...DEFAULTS, ...stored };
     state.locale = i18n?.normalizeLocale(stored.xrcLanguage) || "zh-CN";
     fillForm();
-    await renderProfileSelectors();
+    await renderProfileSelectors(state.activeReplyProfile);
     applyLocale();
     root.addEventListener("click", onClick);
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
-      if (changes.repliedTweetUrls) {
-        const values = Array.isArray(changes.repliedTweetUrls.newValue) ? changes.repliedTweetUrls.newValue : [];
-        state.repliedUrls = new Set(values.map(normalizeTweetUrl).filter(Boolean));
+      const historyKey = repliedHistoryStorageKey();
+      if (historyKey && changes[historyKey]) {
+        state.repliedUrls = new Set(normalizeRepliedHistory(changes[historyKey].newValue));
+        for (const tweet of state.tweets) tweet.alreadyReplied = isTweetReplied(tweet);
+        renderList();
       }
       if (!changes.xrcLanguage || !root.isConnected) return;
       const locale = i18n?.normalizeLocale(changes.xrcLanguage.newValue) || "zh-CN";
@@ -453,7 +517,7 @@
     }, true);
     root.addEventListener("change", (event) => {
       if (event.target.id === "xrc-reply-profile") {
-        return event.target.value ? loadNamedProfile("reply") : undefined;
+        return changeReplyProfileFromUi(event.target.value);
       }
       if (event.target.id === "xrc-post-profile") {
         return event.target.value ? loadNamedProfile("post") : undefined;
@@ -483,15 +547,9 @@
       for (const wake of [...delayWaiters]) wake();
       restorePersistedJobIfIdle();
     });
-    const saved = await chrome.storage.local.get(["autoJob", "postJob", "autoLastStatus", "postLastStatus", "repliedTweetUrls", "collectJob", "replyLoopJob"]);
+    const saved = await chrome.storage.local.get(["autoJob", "postJob", "autoLastStatus", "postLastStatus", "collectJob", "replyLoopJob"]);
     saved.autoJob = applyAutoJobCheckpoint(saved.autoJob);
-    const storedRepliedUrls = Array.isArray(saved.repliedTweetUrls) ? saved.repliedTweetUrls : [];
-    const normalizedRepliedUrls = [...new Set(storedRepliedUrls.map(normalizeTweetUrl).filter(Boolean))].slice(-5000);
-    state.repliedUrls = new Set(normalizedRepliedUrls);
-    if (normalizedRepliedUrls.length !== storedRepliedUrls.length ||
-        normalizedRepliedUrls.some((value, index) => value !== storedRepliedUrls[index])) {
-      await chrome.storage.local.set({ repliedTweetUrls: normalizedRepliedUrls });
-    }
+    await loadActiveRepliedHistory();
     if (saved.autoLastStatus) { toast(localizeText(saved.autoLastStatus)); await chrome.storage.local.remove("autoLastStatus"); }
     if (saved.postLastStatus) { toast(localizeText(saved.postLastStatus)); await chrome.storage.local.remove("postLastStatus"); }
     if (saved.autoJob?.active && ownsJob(saved.autoJob)) resumeAutoJob(saved.autoJob);
@@ -710,7 +768,14 @@
 
   async function renderProfileSelectors(replySelected = "", postSelected = "") {
     const stored = await chrome.storage.local.get(["replyProfiles", "postProfiles"]);
-    renderProfileSelect("xrc-reply-profile", stored.replyProfiles, replySelected);
+    const requestedReplyProfile = replySelected || state.activeReplyProfile;
+    const replyProfiles = Array.isArray(stored.replyProfiles) ? stored.replyProfiles : [];
+    if (requestedReplyProfile && !replyProfiles.some((profile) => profile.name === requestedReplyProfile)) {
+      state.activeReplyProfile = "";
+      const activeKey = activeReplyProfileStorageKey();
+      if (activeKey) await chrome.storage.local.set({ [activeKey]: "" });
+    }
+    renderProfileSelect("xrc-reply-profile", replyProfiles, state.activeReplyProfile || replySelected);
     renderProfileSelect("xrc-post-profile", stored.postProfiles, postSelected);
   }
 
@@ -727,6 +792,7 @@
 
   async function saveNamedProfile(kind) {
     const isReply = kind === "reply";
+    if (isReply && await hasActiveReplyTask()) return toast("评论或采集任务运行期间不能保存方案，请先结束当前任务", true);
     const nameInput = byId(isReply ? "xrc-reply-profile-name" : "xrc-post-profile-name");
     const name = nameInput?.value.trim();
     if (!name) return toast("请先填写方案名称", true);
@@ -741,12 +807,14 @@
     if (index >= 0) profiles[index] = profile;
     else profiles.push(profile);
     await chrome.storage.local.set({ [storageKey]: profiles });
+    if (isReply) await activateReplyProfile(name);
     await renderProfileSelectors(isReply ? name : "", isReply ? "" : name);
     toast(`${isReply ? "评论" : "发帖"}方案“${name}”已保存`);
   }
 
-  async function loadNamedProfile(kind) {
+  async function loadNamedProfile(kind, taskChecked = false) {
     const isReply = kind === "reply";
+    if (isReply && !taskChecked && await hasActiveReplyTask()) return toast("评论或采集任务运行期间不能切换方案，请先结束当前任务", true);
     const select = byId(isReply ? "xrc-reply-profile" : "xrc-post-profile");
     const name = select?.value;
     if (!name) return toast("请先选择一个方案", true);
@@ -764,6 +832,7 @@
     };
     Object.assign(state.settings, settingsToLoad);
     await chrome.storage.local.set(settingsToLoad);
+    if (isReply) await activateReplyProfile(name);
     fillForm();
     const nameInput = byId(isReply ? "xrc-reply-profile-name" : "xrc-post-profile-name");
     if (nameInput) nameInput.value = name;
@@ -775,6 +844,7 @@
 
   async function deleteNamedProfile(kind) {
     const isReply = kind === "reply";
+    if (isReply && await hasActiveReplyTask()) return toast("评论或采集任务运行期间不能删除方案，请先结束当前任务", true);
     const select = byId(isReply ? "xrc-reply-profile" : "xrc-post-profile");
     const name = select?.value;
     if (!name) return toast("请先选择要删除的方案", true);
@@ -782,6 +852,7 @@
     const stored = await chrome.storage.local.get(storageKey);
     const profiles = (Array.isArray(stored[storageKey]) ? stored[storageKey] : []).filter((item) => item.name !== name);
     await chrome.storage.local.set({ [storageKey]: profiles });
+    if (isReply && state.activeReplyProfile === name) await activateReplyProfile("");
     const nameInput = byId(isReply ? "xrc-reply-profile-name" : "xrc-post-profile-name");
     if (nameInput?.value.trim() === name) nameInput.value = "";
     await renderProfileSelectors();
@@ -893,7 +964,7 @@
     const authors = splitTerms(state.settings.authors).map((value) => value.replace(/^@/, "").trim()).filter(Boolean);
     if (authors.length !== 1 || !/^[A-Za-z0-9_]{1,15}$/.test(authors[0])) return toast("自动采集需要在作者账号中只填写一个有效的账号 ID", true);
     const author = authors[0];
-    const job = { active: true, mode: "account", author, limit: state.settings.accountCollectLimit, items: [], returnUrl: location.href, startedAt: Date.now(), ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000 };
+    const job = { active: true, mode: "account", author, limit: state.settings.accountCollectLimit, items: [], replyProfile: state.activeReplyProfile, returnUrl: location.href, startedAt: Date.now(), ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000 };
     await chrome.storage.local.set({ collectJob: job });
     if (location.pathname.toLowerCase() !== `/${author.toLowerCase()}`) { location.href = `https://x.com/${author}`; return; }
     resumeAccountCollection(job);
@@ -904,7 +975,7 @@
     await saveFilters();
     const query = buildSearchQuery(true, false);
     if (!query) return;
-    const job = { active: true, mode: "search", query, limit: state.settings.accountCollectLimit, items: [], returnUrl: location.href, startedAt: Date.now(), ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000 };
+    const job = { active: true, mode: "search", query, limit: state.settings.accountCollectLimit, items: [], replyProfile: state.activeReplyProfile, returnUrl: location.href, startedAt: Date.now(), ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000 };
     await chrome.storage.local.set({ collectJob: job });
     const targetUrl = `https://x.com/search?q=${encodeURIComponent(query)}&src=typed_query&f=live`;
     if (location.pathname !== "/search" || new URLSearchParams(location.search).get("q") !== query) { location.href = targetUrl; return; }
@@ -912,6 +983,7 @@
   }
 
   async function resumeCollectionJob(job) {
+    await ensureReplyProfileContext(job);
     if (!await claimJobLease(job, "collectJob")) return;
     const waitMs = Math.max(0, Number(job?.nextPassAt || 0) - Date.now());
     if (waitMs) {
@@ -1296,8 +1368,9 @@
     for (const tweet of arr) {
       if (String(tweet?.author || "").toLowerCase() !== normalizedAuthor) { stats.noAuthor += 1; continue; }
       const key = normalizeTweetUrl(tweet.url);
+      tweet.alreadyReplied = isTweetReplied(tweet);
       if (excluded.has(key)) { stats.previouslyScanned += 1; continue; }
-      if (!state.settings.replyAlreadyReplied && (tweet.alreadyReplied || state.repliedUrls.has(key))) { stats.alreadyReplied += 1; continue; }
+      if (!state.settings.replyAlreadyReplied && tweet.alreadyReplied) { stats.alreadyReplied += 1; continue; }
       if (hasKeywords) {
         const fullMatch = matchesFilters(tweet);
         const relaxedMatch = tweet.likes >= state.settings.minLikes &&
@@ -1511,7 +1584,7 @@
     return (!state.settings.strictKeywordBody || tweetTextMatchesKeywords(tweet.text, state.settings.keywords)) &&
       (!state.settings.excludeReplies || !tweet.isReply) &&
       (!state.settings.excludeQuotes || !tweet.isQuote) &&
-      (state.settings.replyAlreadyReplied || !tweet.alreadyReplied);
+      (state.settings.replyAlreadyReplied || !isTweetReplied(tweet));
   }
 
   function summarizeCollectedSearchResults(items) {
@@ -1520,6 +1593,7 @@
     const authorSet = new Set(splitTerms(state.settings.authors).map((x) => x.replace(/^@/, "").toLowerCase()));
     for (const tweet of Array.isArray(items) ? items : []) {
       if (!tweet?.url) continue; // 无效条目跳过
+      tweet.alreadyReplied = isTweetReplied(tweet);
       if (state.settings.strictKeywordBody && !tweetTextMatchesKeywords(tweet.text, state.settings.keywords)) { summary.keywordMisses += 1; continue; }
       if (state.settings.excludeReplies && tweet.isReply) { summary.replies += 1; continue; }
       if (state.settings.excludeQuotes && tweet.isQuote) { summary.quotes += 1; continue; }
@@ -1548,7 +1622,7 @@
       active: true, paused: false, mode: filters.loopMode, totalLimit: filters.loopTotalLimit,
       roundLimit: filters.loopRoundLimit, intervalMinutes: filters.loopRoundIntervalMinutes,
       emptyRoundLimit: filters.loopEmptyRoundLimit, sent: 0, skipped: 0, rounds: 0,
-      emptyRounds: 0, author: authors[0] || "", keywords: filters.keywords,
+      emptyRounds: 0, author: authors[0] || "", keywords: filters.keywords, replyProfile: state.activeReplyProfile,
       accountScanItems: [], accountConsumedUrls: [], accountResumeScrollTop: 0,
       homeUrl: location.href, ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000, startedAt: Date.now(), phase: "collecting"
     };
@@ -1566,7 +1640,7 @@
     job.phase = "collecting"; job.nextRoundAt = null; delete job.lastStatus;
     await chrome.storage.local.set({ replyLoopJob: job });
     const collectJob = {
-      active: true, loop: true, mode: job.mode, limit: job.roundLimit, items: [],
+      active: true, loop: true, mode: job.mode, limit: job.roundLimit, items: [], replyProfile: job.replyProfile,
       returnUrl: location.href, startedAt: Date.now(), ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000
     };
     let targetUrl;
@@ -1603,7 +1677,7 @@
     if (!loop?.active) return;
     if (loop.paused) return updateReplyLoopStatus(loop, "循环已暂停，点击“暂停/继续”恢复");
     loop.rounds = (loop.rounds || 0) + 1;
-    const candidates = (tweets || []).filter((tweet) => state.settings.replyAlreadyReplied || !(tweet.alreadyReplied || state.repliedUrls.has(normalizeTweetUrl(tweet.url))));
+    const candidates = (tweets || []).filter((tweet) => state.settings.replyAlreadyReplied || !isTweetReplied(tweet));
     if (collectJob?.mode === "account" || collectJob?.mode === "accountSearch") {
       loop.accountScanItems = mergeLoopAccountItems(loop.accountScanItems, collectJob.items);
       loop.accountConsumedUrls = mergeLoopAccountKeys(loop.accountConsumedUrls, candidates);
@@ -1647,6 +1721,7 @@
   }
 
   async function resumeReplyLoop(loop) {
+    await ensureReplyProfileContext(loop);
     if (runningJobs["replyLoopJob"]) return;
     runningJobs["replyLoopJob"] = true;
     let readyForNextRound = false;
@@ -1774,7 +1849,7 @@
       tweetTextMatchesKeywords(tweet.text, state.settings.keywords) &&
       tweet.likes >= state.settings.minLikes && tweet.ageHours <= state.settings.maxAgeDays * 24 &&
       (!state.settings.excludeReplies || !tweet.isReply) && (!state.settings.excludeQuotes || !tweet.isQuote) &&
-      (state.settings.replyAlreadyReplied || !tweet.alreadyReplied);
+      (state.settings.replyAlreadyReplied || !isTweetReplied(tweet));
   }
 
   function tweetTextMatchesKeywords(text, keywordSetting) {
@@ -1847,7 +1922,7 @@
       ? state.tweets.length * directRepeatCount
       : state.settings.replyAlreadyReplied
       ? state.tweets.length
-      : state.tweets.filter((tweet) => !tweet.alreadyReplied).length;
+      : state.tweets.filter((tweet) => !isTweetReplied(tweet)).length;
     const plannedCount = directMultiMode ? eligibleCount : state.settings.autoReplyCount;
     const autoButtons = state.autoRunning ? `<button class="danger" data-act="stop-auto">${localizeText("停止")}</button>` : `<button data-act="auto">${localizeText("开始")}</button>`;
     const modeDescription = directMultiMode
@@ -1855,7 +1930,7 @@
       : `${localizeText("当前可发送")} ${eligibleCount} ${localizeText("条")} · ${localizeText("按")} ${sortDescription(state.settings.sortBy)} ${localizeText("处理")}`;
     const autoBar = state.tweets.length ? `<div class="xrc-auto"><div><b>${localizeText("批量自动回复")}</b><label>${localizeText("计划发送")} <input id="xrc-auto-run-count" type="number" min="1" max="2000" value="${plannedCount}" ${state.autoRunning ? "disabled" : ""}> ${localizeText("条")}</label><small>${escapeHtml(localizeText(state.autoStatus || modeDescription))}</small></div>${autoButtons}</div>` : "";
     byId("xrc-list").innerHTML = state.tweets.length ? autoBar + state.tweets.map((t, i) => `
-      <article class="xrc-card"><div class="xrc-meta"><b>@${escapeHtml(t.author)}</b><span>❤ ${formatNumber(t.likes)}</span><span>◉ ${formatNumber(t.views)}</span><em>${Math.round(t.ageHours)}h</em>${t.alreadyReplied ? `<strong class="replied">${localizeText("已回复")}</strong>` : ""}</div>
+      <article class="xrc-card"><div class="xrc-meta"><b>@${escapeHtml(t.author)}</b><span>❤ ${formatNumber(t.likes)}</span><span>◉ ${formatNumber(t.views)}</span><em>${Math.round(t.ageHours)}h</em>${isTweetReplied(t) ? `<strong class="replied">${localizeText("已回复")}</strong>` : ""}</div>
       <p data-xrc-user-content>${escapeHtml(t.text.slice(0, 240))}</p>
       <div class="xrc-actions"><button data-act="open" data-url="${escapeAttr(t.url)}">${localizeText("原帖")}</button><button class="hot" data-act="details" data-index="${i}">${localizeText("生成回复")}</button></div></article>`).join("") : `<div class="xrc-empty">${localizeText("没有符合条件的帖子。尝试降低点赞门槛、清空作者，或先滚动加载更多内容。")}</div>`;
   }
@@ -1958,7 +2033,7 @@
     const directMultiMode = !fromLoop && state.tweets.length > 0 && state.tweets.every((tweet) => tweet.directTarget) && directRepeatCount > 1;
     const baseCandidates = directMultiMode || state.settings.replyAlreadyReplied
       ? state.tweets
-      : state.tweets.filter((tweet) => !tweet.alreadyReplied);
+      : state.tweets.filter((tweet) => !isTweetReplied(tweet));
     const candidates = directMultiMode
       ? baseCandidates.flatMap((tweet) => Array.from({ length: directRepeatCount }, (_, repeatIndex) => ({ ...tweet, directRepeatIndex: repeatIndex + 1, directRepeatTotal: directRepeatCount })))
       : baseCandidates;
@@ -1977,7 +2052,7 @@
     }
     const target = fromLoop ? Math.min(requestedTarget, candidates.length) : requestedTarget;
     const items = candidates.map(({ author, text, likes, views, ageHours, url, alreadyReplied }) => ({ author, text, likes, views, ageHours, url, alreadyReplied }));
-    const job = { active: true, paused: false, loop: Boolean(fromLoop), directMultiMode, items, requestedTarget, target, excludedAlreadyReplied: state.tweets.length - baseCandidates.length, current: 0, sent: 0, skipped: 0, returnUrl: location.href, allowRepeat: directMultiMode || state.settings.replyAlreadyReplied, replySource: state.settings.replySource, specifiedReplies: specified, specifiedReplyOrder: state.settings.specifiedReplyOrder, replyMode: state.settings.replyMode, customPrompt: state.settings.customPrompt, maxChars: state.settings.maxChars, suggestionCount: 1, delayMode: state.settings.delayMode, delaySeconds: state.settings.autoDelaySeconds, randomDelayMin: state.settings.randomDelayMin, randomDelayMax: state.settings.randomDelayMax, imageUseChance: state.settings.imageUseChance, imageCount: state.settings.imageCount || 1, imageSelectionMode: state.settings.imageSelectionMode || "random", startedAt: Date.now(), ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000, failureStreak: 0, _runId: makeRunId() };
+    const job = { active: true, paused: false, loop: Boolean(fromLoop), directMultiMode, items, requestedTarget, target, excludedAlreadyReplied: state.tweets.length - baseCandidates.length, current: 0, sent: 0, skipped: 0, returnUrl: location.href, allowRepeat: directMultiMode || state.settings.replyAlreadyReplied, replyProfile: state.activeReplyProfile, replySource: state.settings.replySource, specifiedReplies: specified, specifiedReplyOrder: state.settings.specifiedReplyOrder, replyMode: state.settings.replyMode, customPrompt: state.settings.customPrompt, maxChars: state.settings.maxChars, suggestionCount: 1, delayMode: state.settings.delayMode, delaySeconds: state.settings.autoDelaySeconds, randomDelayMin: state.settings.randomDelayMin, randomDelayMax: state.settings.randomDelayMax, imageUseChance: state.settings.imageUseChance, imageCount: state.settings.imageCount || 1, imageSelectionMode: state.settings.imageSelectionMode || "random", startedAt: Date.now(), ownerTabId: state.tabId, accountId: state.accountId, leaseUntil: Date.now() + 90000, failureStreak: 0, _runId: makeRunId() };
     if (fromLoop && state.loopCollectionSummary) job.collectionSummary = state.loopCollectionSummary;
     state.autoStatus = `正在创建 ${job.target} 条自动回复任务 · ${delayDescription}`; renderList();
     await chrome.storage.local.set({ autoJob: job });
@@ -1988,6 +2063,7 @@
 
   async function resumeAutoJob(job) {
     if (!job?.active || !job.items?.length) return;
+    await ensureReplyProfileContext(job);
     // Local runner gate: prevent duplicate concurrent runners for the same job.
     if (runningJobs["autoJob"]) return;
     if (!job._runId) {
@@ -2027,12 +2103,17 @@
       const policyBeforeLoad = await refreshAutoRepeatPolicy(job, myRunId);
       if (!policyBeforeLoad || !isAutoRunCurrent(myRunId)) return;
       Object.assign(job, policyBeforeLoad);
-      const detectExistingDuringLoad = !job.allowRepeat || (!job.directMultiMode && job.verifyCurrentBeforeRetry);
+      const verifyPendingSend = !job.directMultiMode && job.verifyCurrentBeforeRetry && tweet.lastAttemptText;
+      const detectExistingDuringLoad = !job.allowRepeat || verifyPendingSend;
       if (detectExistingDuringLoad) showJobBar(`正在检查候选 ${job.current + 1}/${job.items.length} 是否已经回复…`, collectionMeta);
-      const pageState = await waitForTweetPage(tweet, 10000, detectExistingDuringLoad);
+      const pageState = await waitForTweetPage(tweet, 10000, {
+        checkHistory: !job.allowRepeat,
+        visibleReplyText: verifyPendingSend ? tweet.lastAttemptText : "",
+        visibleReplyAfter: verifyPendingSend ? tweet.lastAttemptAt : 0
+      });
       if (pageState === "alreadyReplied") {
         showJobBar(`检测到候选 ${job.current + 1}/${job.items.length} 已经回复，正在跳过…`, collectionMeta);
-        rememberReplied(tweet.url);
+        rememberReplied(tweet.url, job.replyProfile);
         return advanceSkippedJob(job, "页面加载时检测到已经回复过");
       }
       if (pageState !== "ready") {
@@ -2052,14 +2133,15 @@
       Object.assign(tweet, readCurrentTweet(tweet));
       if (!job.allowRepeat && hasExistingReply(tweet)) {
         showJobBar(`检测到候选 ${job.current + 1}/${job.items.length} 已经回复，正在跳过…`, collectionMeta);
-        rememberReplied(tweet.url);
+        rememberReplied(tweet.url, job.replyProfile);
         return advanceSkippedJob(job, "检测到已经回复过");
       }
-      if (!job.directMultiMode && job.verifyCurrentBeforeRetry && hasExistingReply(tweet)) {
+      if (!job.directMultiMode && job.verifyCurrentBeforeRetry && tweet.lastAttemptText &&
+          hasVisibleOwnReply(tweet, tweet.lastAttemptText, tweet.lastAttemptAt)) {
         if (!isAutoRunCurrent(myRunId)) return;
         job.verifyCurrentBeforeRetry = false;
         await chrome.storage.local.set({ autoJob: job });
-        rememberReplied(tweet.url);
+        rememberReplied(tweet.url, job.replyProfile);
         return advanceSkippedJob(job, "恢复任务时检测到当前帖子已经发送成功");
       }
       if (!isAutoRunCurrent(myRunId)) return;
@@ -2128,6 +2210,7 @@
       const button = findSendButtonStrict(activeEditor);
       if (!button || !scopeContainsElement(activeEditor, button)) return retryCurrentStep(job, tweet, "buttonRetries", "发送按钮不在当前回复框中", 1);
       const priorOwnPostKeys = snapshotRecentOwnPostKeys();
+      const attemptAt = Date.now();
       button.click();
       showJobBar(`正在确认第 ${job.sent + 1}/${target} 条是否发送成功…`, collectionMeta);
       const submission = await waitForReplySubmission(30000, expectedText, {
@@ -2139,6 +2222,8 @@
       if (submission === "stopped" || !isAutoRunCurrent(myRunId)) return;
       if (submission === "duplicate") return advanceSkippedJob(job, "X 提示这条回复已经发送过");
       if (submission !== "sent") {
+        tweet.lastAttemptText = expectedText;
+        tweet.lastAttemptAt = attemptAt;
         job.verifyCurrentBeforeRetry = !job.directMultiMode;
         const reason = submission === "failed" ? "X 返回发送失败" : "发送结果暂时无法确认";
         return retryCurrentStep(job, tweet, "submitRetries", reason, 2);
@@ -2146,7 +2231,13 @@
       // Commit the sent item using fresh storage read to avoid overwriting pause.
       if (!isAutoRunCurrent(myRunId)) return;
       const committed = await commitJobMutation("autoJob", myRunId, (latest) => {
-        tweet.fillRetries = 0; tweet.buttonRetries = 0; tweet.submitRetries = 0;
+        const completedTweet = latest.items?.[latest.current];
+        if (completedTweet) {
+          completedTweet.fillRetries = 0; completedTweet.buttonRetries = 0; completedTweet.submitRetries = 0;
+          delete completedTweet.lastAttemptText;
+          delete completedTweet.lastAttemptAt;
+        }
+        latest.verifyCurrentBeforeRetry = false;
         latest.sent = (latest.sent || 0) + 1;
         latest.current = (latest.current || 0) + 1;
         latest.failureStreak = 0;
@@ -2155,7 +2246,7 @@
       if (!committed) { releaseAutoRun(myRunId); return; }
       Object.assign(job, committed);
       await recordSuccessfulSend("reply");
-      rememberReplied(tweet.url);
+      rememberReplied(tweet.url, job.replyProfile);
       if (state.settings.autoLikeReply) likeMostRecentOwnPost().catch(() => {});
       const waitSeconds = chooseJobDelay(job);
       enqueueAiPrefetch(job, job.current);
@@ -2593,12 +2684,19 @@
     return null;
   }
   function hasExistingReply(tweet) {
-    const key = normalizeTweetUrl(tweet.url);
-    if (state.repliedUrls.has(key)) return true;
-    return hasVisibleOwnReply(tweet);
+    return isTweetReplied(tweet);
   }
-  function hasVisibleOwnReply(tweet) {
+  function hasVisibleOwnReply(tweet, expectedText = "", earliestTimestamp = 0) {
     const key = normalizeTweetUrl(tweet.url);
+    const expected = String(expectedText || "").trim();
+    const earliest = Math.max(0, Number(earliestTimestamp) || 0) - 15000;
+    const matchesAttempt = (article) => {
+      if (!expected) return true;
+      const text = article?.querySelector('[data-testid="tweetText"]')?.innerText || "";
+      if (!contentLooksComplete(text, expected)) return false;
+      const timestamp = Date.parse(article?.querySelector("time")?.dateTime || "");
+      return !earliest || (Number.isFinite(timestamp) && timestamp >= earliest);
+    };
     const ownHandles = new Set();
     if (state.accountId && state.accountId !== "unknown") ownHandles.add(String(state.accountId).toLowerCase());
     const profileHref = document.querySelector('[data-testid="AppTabBar_Profile_Link"]')?.getAttribute("href") || "";
@@ -2619,7 +2717,7 @@
       }
       const authorText = article.querySelector('[data-testid="User-Name"]')?.innerText || "";
       for (const match of authorText.matchAll(/@([A-Za-z0-9_]{1,15})/g)) articleHandles.add(match[1].toLowerCase());
-      return [...articleHandles].some((handle) => ownHandles.has(handle));
+      return [...articleHandles].some((handle) => ownHandles.has(handle)) && matchesAttempt(article);
     });
     if (matchedArticle) return true;
     return [...document.querySelectorAll('[data-testid="User-Name"]')].some((authorNode) => {
@@ -2633,7 +2731,7 @@
       }
       if (![...handles].some((handle) => ownHandles.has(handle))) return false;
       const tweetNode = authorNode.closest('[data-testid="tweet"]');
-      return !tweetNode || !articleHasTweetKey(tweetNode, key);
+      return (!tweetNode || !articleHasTweetKey(tweetNode, key)) && matchesAttempt(tweetNode);
     });
   }
   function articleHasTweetKey(article, key) {
@@ -2652,11 +2750,23 @@
       return latest;
     });
   }
-  function rememberReplied(url) {
-    state.repliedUrls.add(normalizeTweetUrl(url));
-    const values = [...state.repliedUrls].filter(Boolean).slice(-5000);
-    state.repliedUrls = new Set(values);
-    chrome.storage.local.set({ repliedTweetUrls: values }).catch((error) => {
+  function rememberReplied(url, profileName = state.activeReplyProfile) {
+    const repliedKey = normalizeTweetUrl(url);
+    if (!repliedKey) return;
+    const storageKey = repliedHistoryStorageKey(state.accountId, profileName);
+    if (!storageKey) {
+      state.repliedUrls.add(repliedKey);
+      return;
+    }
+    const isActiveScope = storageKey === repliedHistoryStorageKey();
+    const currentValues = isActiveScope ? [...state.repliedUrls, repliedKey] : [repliedKey];
+    const values = normalizeRepliedHistory(currentValues);
+    if (isActiveScope) state.repliedUrls = new Set(values);
+    chrome.storage.local.get(storageKey).then((stored) => {
+      const merged = normalizeRepliedHistory([...(Array.isArray(stored[storageKey]) ? stored[storageKey] : []), ...values]);
+      if (storageKey === repliedHistoryStorageKey()) state.repliedUrls = new Set(merged);
+      return chrome.storage.local.set({ [storageKey]: merged });
+    }).catch((error) => {
       if (!isExtensionContextInvalidated(error)) console.error("[XRC] 回复历史保存失败", error);
     });
   }
@@ -3690,19 +3800,22 @@
     return editors.sort((a, b) => elementPriority(b) - elementPriority(a))[0] || null;
   }
   async function waitForReplyEditor(timeoutMs) { const deadline = Date.now() + timeoutMs; while (Date.now() < deadline) { const editor = findReplyEditor(); if (editor && editor.isConnected) return editor; await delay(250); } return null; }
-  async function waitForTweetPage(tweet, timeoutMs, detectExistingReply = false) {
+  async function waitForTweetPage(tweet, timeoutMs, replyCheck = {}) {
+    if (typeof replyCheck === "boolean") replyCheck = { checkHistory: replyCheck };
+    const checkHistory = Boolean(replyCheck.checkHistory);
+    const visibleReplyText = String(replyCheck.visibleReplyText || "").trim();
     const deadline = Date.now() + timeoutMs;
     const targetKey = normalizeTweetUrl(tweet.url);
     let readyAt = 0;
-    if (detectExistingReply && hasExistingReply(tweet)) return "alreadyReplied";
+    if (checkHistory && hasExistingReply(tweet)) return "alreadyReplied";
     while (Date.now() < deadline) {
-      if (detectExistingReply && hasVisibleOwnReply(tweet)) return "alreadyReplied";
+      if (visibleReplyText && hasVisibleOwnReply(tweet, visibleReplyText, replyCheck.visibleReplyAfter)) return "alreadyReplied";
       const articles = [...document.querySelectorAll('article[data-testid="tweet"]')];
       const targetArticle = articles.find((article) => articleHasTweetKey(article, targetKey));
       // X changes status-link/editor wrappers frequently. Once timeline content
       // is visible, downstream editor handling can decide whether replying is possible.
       const ready = Boolean(findReplyEditor() || targetArticle || articles.length);
-      if (ready && !detectExistingReply) return "ready";
+      if (ready && !visibleReplyText) return "ready";
       if (ready) {
         readyAt ||= Date.now();
         // Replies often render just after the target article/composer. Give
